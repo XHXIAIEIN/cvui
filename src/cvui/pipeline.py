@@ -196,41 +196,84 @@ class DetectionContext:
 
     @staticmethod
     def _format_by_columns(lines, rects, labels, classifications, img_w, img_h):
-        """Auto-detect columns and group elements spatially."""
+        """Auto-detect layout regions and group elements spatially.
+
+        Detects major vertical splits (sidebar | content) from element X
+        distribution, then detects horizontal splits (header | body) from
+        element Y distribution. Groups elements into these regions.
+        """
         if not rects:
             lines.append("(no elements detected)")
             return
 
-        # Auto-detect vertical columns from element X positions
-        x_centers = [(r[0] + r[2]) // 2 for r in rects]
-        # Bucket into columns (100px wide)
-        bucket_size = max(80, img_w // 8)
-        columns: dict[int, list[int]] = {}
-        for i, xc in enumerate(x_centers):
-            col = xc // bucket_size
-            columns.setdefault(col, []).append(i)
+        # --- Detect vertical split (sidebar | content) ---
+        # Find gaps in X coverage: sort all left edges, find largest gap
+        left_edges = sorted(set(r[0] for r in rects))
+        best_gap_x, best_gap_size = img_w // 2, 0
+        for i in range(len(left_edges) - 1):
+            gap = left_edges[i + 1] - left_edges[i]
+            if gap > best_gap_size and left_edges[i] > img_w * 0.05:
+                best_gap_size = gap
+                best_gap_x = left_edges[i + 1]
 
-        for col_id in sorted(columns.keys()):
-            col_elems = columns[col_id]
-            col_x1 = col_id * bucket_size
-            col_x2 = min(col_x1 + bucket_size, img_w)
+        # Only use the split if the gap is significant
+        has_sidebar = best_gap_size > img_w * 0.03
 
-            # Sort by Y position
-            col_elems.sort(key=lambda i: rects[i][1])
+        # --- Detect horizontal split (header | body) ---
+        top_edges = sorted(set(r[1] for r in rects))
+        best_gap_y, best_gap_y_size = 0, 0
+        for i in range(min(5, len(top_edges) - 1)):  # only check top area
+            gap = top_edges[i + 1] - top_edges[i]
+            if gap > best_gap_y_size and top_edges[i] < img_h * 0.15:
+                best_gap_y_size = gap
+                best_gap_y = top_edges[i + 1]
+        has_header = best_gap_y_size > img_h * 0.02
 
-            lines.append(f"--- Column x={col_x1}-{col_x2} ({len(col_elems)} elements) ---")
-            for i in col_elems:
+        # --- Assign elements to regions ---
+        regions: dict[str, list[int]] = {}
+        for i, r in enumerate(rects):
+            cx = (r[0] + r[2]) // 2
+            cy = (r[1] + r[3]) // 2
+
+            if has_header and cy < best_gap_y:
+                region = "Header"
+            elif has_sidebar and cx < best_gap_x:
+                region = "Sidebar"
+            else:
+                region = "Content"
+
+            regions.setdefault(region, []).append(i)
+
+        # --- Format output ---
+        region_order = ["Header", "Sidebar", "Content"]
+        for region_name in region_order:
+            elems = regions.get(region_name, [])
+            if not elems:
+                continue
+
+            # Sort top-to-bottom, left-to-right
+            elems.sort(key=lambda i: (rects[i][1], rects[i][0]))
+
+            # Compute region bounds
+            rx1 = min(rects[i][0] for i in elems)
+            ry1 = min(rects[i][1] for i in elems)
+            rx2 = max(rects[i][2] for i in elems)
+            ry2 = max(rects[i][3] for i in elems)
+
+            lines.append(f"[{region_name}] ({rx1},{ry1})-({rx2},{ry2}) — {len(elems)} elements")
+            for i in elems:
                 r = rects[i]
                 ew, eh = r[2] - r[0], r[3] - r[1]
                 cls = classifications.get(i, "")
                 label = labels.get(i, "")
-                truncated = r[0] <= 5 or r[1] <= 5 or r[2] >= img_w - 5 or r[3] >= img_h - 5
+                truncated = (r[0] <= 5 or r[1] <= 5
+                             or r[2] >= img_w - 5 or r[3] >= img_h - 5)
 
                 parts = [f"  [{i}]"]
                 if cls:
                     parts.append(f"[{cls}]")
                 if truncated:
-                    parts.append(f"[truncated]")
+                    parts.append("[truncated]")
                 parts.append(f"({r[0]},{r[1]})")
                 parts.append(f"{ew}x{eh}")
                 if label:
