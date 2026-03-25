@@ -45,10 +45,10 @@ class DilateStage(DetectionStage):
         """
         density = np.count_nonzero(binary) / max(binary.size, 1)
 
-        if density > 0.15:
-            # Dense UI (settings panels, toolbars)
+        if density > 0.10:
+            # Dense UI (settings panels, toolbars, forms)
             return (2, 6), (3, 2)
-        elif density > 0.08:
+        elif density > 0.05:
             # Medium density
             return (2, 10), (5, 2)
         else:

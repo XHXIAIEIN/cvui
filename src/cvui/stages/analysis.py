@@ -65,7 +65,55 @@ class NestedStage(DetectionStage):
             if (gx2 - gx1) > rw * 0.9 and (gy2 - gy1) > rh * 0.9:
                 continue
             results.append((gx1, gy1, gx2, gy2))
+
+        # If sub-pipeline found nothing useful (0 children), try row splitting
+        if len(results) == 0 and rh > 60:
+            row_results = self._split_rows(img, region)
+            if len(row_results) > 1:
+                results = row_results
+
         return results
+
+    @staticmethod
+    def _split_rows(img, region):
+        """Split a large rect into rows by detecting horizontal gaps."""
+        import cv2
+        x1, y1, x2, y2 = region
+        sub = img[y1:y2, x1:x2]
+        if sub.size == 0:
+            return []
+
+        gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        median = float(np.median(gray))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
+        if median >= 128:
+            fg = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        else:
+            fg = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+
+        # Row density profile
+        row_density = np.mean(fg.astype(np.float32), axis=1)
+        # Smooth slightly
+        if len(row_density) > 10:
+            row_density = np.convolve(row_density, np.ones(5)/5, mode='same')
+
+        # Find content blocks (density > threshold)
+        threshold = max(row_density.max() * 0.1, 2.0)
+        blocks = []
+        in_block = False
+        start = 0
+        for i in range(len(row_density)):
+            if row_density[i] > threshold and not in_block:
+                start = i
+                in_block = True
+            elif row_density[i] <= threshold and in_block:
+                if i - start > 15:  # min row height
+                    blocks.append((x1, y1 + start, x2, y1 + i))
+                in_block = False
+        if in_block and len(row_density) - start > 15:
+            blocks.append((x1, y1 + start, x2, y1 + len(row_density)))
+
+        return blocks
 
 
 class ClassifyStage(DetectionStage):
