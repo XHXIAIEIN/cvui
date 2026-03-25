@@ -7,23 +7,53 @@ from cvui.pipeline import DetectionStage, DetectionContext
 
 
 class DilateStage(DetectionStage):
-    """Directional dilation — connect icon+text on same row, title+subtitle."""
+    """Adaptive directional dilation — kernel size scales with content density.
 
-    def __init__(self, h_kernel: tuple[int, int] = (2, 15),
-                 v_kernel: tuple[int, int] = (7, 2)):
-        self.h_kernel = h_kernel
-        self.v_kernel = v_kernel
+    Dense UI (many small elements close together) → small kernel (don't merge)
+    Sparse UI (few large elements far apart) → large kernel (connect icon+text)
+    """
+
+    def __init__(self, h_kernel: tuple[int, int] | None = None,
+                 v_kernel: tuple[int, int] | None = None):
+        self._h_kernel = h_kernel
+        self._v_kernel = v_kernel
 
     def process(self, ctx):
         import cv2
         if ctx.binary is None:
             return ctx
-        b = cv2.morphologyEx(ctx.binary, cv2.MORPH_CLOSE, np.ones((4, 4), np.uint8))
-        b = cv2.dilate(b, np.ones(self.h_kernel, np.uint8), iterations=1)
-        b = cv2.dilate(b, np.ones(self.v_kernel, np.uint8), iterations=1)
+
+        # Auto-adapt kernel if not explicitly set
+        if self._h_kernel is None or self._v_kernel is None:
+            h_k, v_k = self._auto_kernel(ctx.binary)
+        else:
+            h_k, v_k = self._h_kernel, self._v_kernel
+
+        b = cv2.morphologyEx(ctx.binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        b = cv2.dilate(b, np.ones(h_k, np.uint8), iterations=1)
+        b = cv2.dilate(b, np.ones(v_k, np.uint8), iterations=1)
         b = cv2.morphologyEx(b, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         ctx.binary = b
         return ctx
+
+    @staticmethod
+    def _auto_kernel(binary: np.ndarray) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Compute kernel size from foreground density.
+
+        High density (>15% foreground) = dense UI → small kernels
+        Low density (<5% foreground) = sparse UI → large kernels
+        """
+        density = np.count_nonzero(binary) / max(binary.size, 1)
+
+        if density > 0.15:
+            # Dense UI (settings panels, toolbars)
+            return (2, 6), (3, 2)
+        elif density > 0.08:
+            # Medium density
+            return (2, 10), (5, 2)
+        else:
+            # Sparse UI (chat apps, simple layouts)
+            return (2, 15), (7, 2)
 
 
 class ConnectedComponentStage(DetectionStage):

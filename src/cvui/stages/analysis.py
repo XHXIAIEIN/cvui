@@ -54,7 +54,7 @@ class NestedStage(DetectionStage):
 
         sub_pipeline = DetectionPipeline([
             GrayscaleStage(), TopHatStage(kernel_size=kernel_size), OtsuStage(),
-            DilateStage(h_kernel=(2, 8), v_kernel=(4, 2)),
+            DilateStage(),  # auto-adapt kernel from content density
             ConnectedComponentStage(min_w=10, min_h=8),
         ])
         sub_ctx = sub_pipeline.run(sub_img)
