@@ -54,7 +54,7 @@ class GrayscaleStage(DetectionStage):
         import cv2
         gray = cv2.cvtColor(ctx.img, cv2.COLOR_BGR2GRAY)
         median = float(np.median(gray))
-        if median > 0:
+        if 0 < median < 254:
             gamma = np.log(100.0 / 255.0) / np.log(max(median, 1.0) / 255.0)
             gamma = float(np.clip(gamma, 0.4, 2.0))
             gray = np.clip(
