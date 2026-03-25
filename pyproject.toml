@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cvui"
+version = "0.1.0"
+description = "Pure CV UI element detection — pluggable pipeline with 14 stages"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+ocr = ["winocr>=0.2.0"]
+ml = ["transformers>=4.30.0", "httpx>=0.24.0"]
+window = ["pyautogui>=0.9.54", "mss>=9.0.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cvui"]

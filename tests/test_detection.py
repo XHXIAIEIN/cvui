@@ -1,0 +1,509 @@
+"""Tests for pluggable detection pipeline."""
+import numpy as np
+import pytest
+
+from cvui.detection import (
+    DetectionContext,
+    DetectionStage,
+    DetectionPipeline,
+    GrayscaleStage,
+    TopHatStage,
+    OtsuStage,
+    DilateStage,
+    ConnectedComponentStage,
+    RectFilterStage,
+    MergeStage,
+)
+
+
+# ---------------------------------------------------------------------------
+# Framework tests
+# ---------------------------------------------------------------------------
+
+class TestDetectionContext:
+    def test_create_from_image(self):
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        assert ctx.rects == []
+        assert ctx.quality_score == 0.0
+        assert ctx.stage_log == []
+
+    def test_dimensions(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        assert ctx.height == 600
+        assert ctx.width == 800
+
+
+class TestDetectionStage:
+    def test_is_abstract(self):
+        with pytest.raises(TypeError):
+            DetectionStage()
+
+
+class TestDetectionPipeline:
+    def test_runs_in_order(self):
+        class A(DetectionStage):
+            def process(self, ctx):
+                ctx.rects.append((0, 0, 10, 10))
+                return ctx
+
+        class B(DetectionStage):
+            def process(self, ctx):
+                ctx.rects.append((20, 20, 30, 30))
+                return ctx
+
+        ctx = DetectionPipeline([A(), B()]).run(np.zeros((100, 100, 3), dtype=np.uint8))
+        assert len(ctx.rects) == 2
+        assert len(ctx.stage_log) == 2
+
+    def test_early_exit(self):
+        class StopEarly(DetectionStage):
+            def process(self, ctx):
+                ctx.quality_score = 0.9
+                return ctx
+            def should_continue(self, ctx):
+                return ctx.quality_score < 0.8
+
+        class NeverReached(DetectionStage):
+            def process(self, ctx):
+                ctx.rects.append((99, 99, 99, 99))
+                return ctx
+
+        ctx = DetectionPipeline([StopEarly(), NeverReached()]).run(
+            np.zeros((100, 100, 3), dtype=np.uint8))
+        assert len(ctx.rects) == 0
+        assert len(ctx.stage_log) == 1
+
+    def test_empty_pipeline(self):
+        ctx = DetectionPipeline([]).run(np.zeros((50, 50, 3), dtype=np.uint8))
+        assert ctx.rects == []
+
+
+# ---------------------------------------------------------------------------
+# Stage tests
+# ---------------------------------------------------------------------------
+
+class TestGrayscaleStage:
+    def test_produces_gray(self):
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        img[:] = (40, 80, 120)
+        ctx = GrayscaleStage().process(DetectionContext(img=img))
+        assert ctx.gray is not None
+        assert ctx.gray.shape == (100, 100)
+
+    def test_dark_image_brightened(self):
+        img = np.full((100, 100, 3), 30, dtype=np.uint8)
+        ctx = GrayscaleStage().process(DetectionContext(img=img))
+        assert np.median(ctx.gray) > 30
+
+    def test_light_image_not_overexposed(self):
+        img = np.full((100, 100, 3), 220, dtype=np.uint8)
+        ctx = GrayscaleStage().process(DetectionContext(img=img))
+        assert np.median(ctx.gray) < 255
+
+
+class TestTopHatStage:
+    def test_extracts_bright_elements(self):
+        img = np.zeros((200, 300, 3), dtype=np.uint8)
+        img[:] = (40, 40, 40)
+        img[50:80, 50:150] = (180, 180, 180)
+        ctx = DetectionContext(img=img)
+        ctx = GrayscaleStage().process(ctx)
+        ctx = TopHatStage().process(ctx)
+        # TopHat result should have high values where bright element is
+        assert ctx.gray[65, 100] > ctx.gray[10, 10]
+
+    def test_needs_gray(self):
+        """Auto-generates gray if missing."""
+        img = np.full((50, 50, 3), 100, dtype=np.uint8)
+        ctx = TopHatStage().process(DetectionContext(img=img))
+        assert ctx.gray is not None
+
+
+class TestOtsuStage:
+    def test_produces_binary(self):
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        img[:] = (40, 40, 40)
+        img[30:60, 30:80] = (180, 180, 180)
+        ctx = DetectionContext(img=img)
+        ctx = GrayscaleStage().process(ctx)
+        ctx = TopHatStage().process(ctx)
+        ctx = OtsuStage().process(ctx)
+        assert ctx.binary is not None
+        assert set(np.unique(ctx.binary)).issubset({0, 255})
+
+    def test_skips_without_gray(self):
+        ctx = OtsuStage().process(DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8)))
+        assert ctx.binary is None
+
+
+class TestDilateStage:
+    def test_connects_horizontal_gap(self):
+        binary = np.zeros((100, 200), dtype=np.uint8)
+        binary[40:50, 20:40] = 255
+        binary[40:50, 50:70] = 255  # 10px gap
+        ctx = DetectionContext(img=np.zeros((100, 200, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx = DilateStage(h_kernel=(2, 15), v_kernel=(7, 2)).process(ctx)
+        assert ctx.binary[45, 45] == 255
+
+    def test_skips_without_binary(self):
+        ctx = DilateStage().process(
+            DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8)))
+        assert ctx.binary is None
+
+
+class TestConnectedComponentStage:
+    def test_produces_rects(self):
+        binary = np.zeros((200, 300), dtype=np.uint8)
+        binary[20:60, 20:100] = 255
+        binary[100:130, 150:250] = 255
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx = ConnectedComponentStage().process(ctx)
+        assert len(ctx.rects) == 2
+
+    def test_filters_tiny(self):
+        binary = np.zeros((200, 300), dtype=np.uint8)
+        binary[10:13, 10:13] = 255  # too small
+        binary[50:90, 50:150] = 255
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx = ConnectedComponentStage(min_w=15, min_h=10).process(ctx)
+        assert len(ctx.rects) == 1
+
+    def test_computes_quality(self):
+        binary = np.zeros((200, 300), dtype=np.uint8)
+        binary[20:60, 20:100] = 255
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx = ConnectedComponentStage().process(ctx)
+        assert ctx.quality_score > 0
+
+    def test_should_continue_when_low_quality(self):
+        stage = ConnectedComponentStage()
+        ctx = DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8))
+        ctx.quality_score = 0.3
+        assert stage.should_continue(ctx) is True
+
+    def test_should_stop_when_high_quality(self):
+        stage = ConnectedComponentStage()
+        ctx = DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8))
+        ctx.quality_score = 0.9
+        assert stage.should_continue(ctx) is False
+
+
+class TestRectFilterStage:
+    def test_removes_small(self):
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 100, 50), (200, 200, 205, 203)]  # big + tiny
+        ctx = RectFilterStage(min_area=500).process(ctx)
+        assert len(ctx.rects) == 1
+
+    def test_keeps_large(self):
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.rects = [(0, 0, 100, 100)]
+        ctx = RectFilterStage(min_area=200).process(ctx)
+        assert len(ctx.rects) == 1
+
+
+class TestMergeStage:
+    def test_merges_overlapping(self):
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 50, 50), (30, 30, 70, 70)]
+        ctx = MergeStage().process(ctx)
+        assert len(ctx.rects) == 1
+        assert ctx.rects[0] == (10, 10, 70, 70)
+
+    def test_keeps_separate(self):
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 50, 50), (200, 200, 250, 250)]
+        ctx = MergeStage().process(ctx)
+        assert len(ctx.rects) == 2
+
+    def test_chain_merge(self):
+        """A overlaps B, B overlaps C -> all merge into one."""
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        ctx.rects = [(0, 0, 30, 30), (20, 20, 50, 50), (40, 40, 70, 70)]
+        ctx = MergeStage().process(ctx)
+        assert len(ctx.rects) == 1
+
+    def test_empty(self):
+        ctx = DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8))
+        ctx.rects = []
+        ctx = MergeStage().process(ctx)
+        assert ctx.rects == []
+
+
+# ---------------------------------------------------------------------------
+# Integration: mini pipeline
+# ---------------------------------------------------------------------------
+
+class TestMiniPipeline:
+    def _make_ui_image(self):
+        img = np.zeros((300, 400, 3), dtype=np.uint8)
+        img[:] = (40, 40, 40)
+        img[30:60, 30:80] = (180, 180, 180)
+        img[30:55, 100:250] = (200, 200, 200)
+        img[100:130, 30:80] = (160, 160, 160)
+        img[100:120, 100:200] = (180, 180, 180)
+        return img
+
+    def test_fast_pipeline(self):
+        pipeline = DetectionPipeline([
+            GrayscaleStage(), TopHatStage(), OtsuStage(),
+            DilateStage(), ConnectedComponentStage(),
+        ])
+        ctx = pipeline.run(self._make_ui_image())
+        assert len(ctx.rects) >= 2
+        assert len(ctx.stage_log) <= 5
+
+    def test_standard_pipeline(self):
+        pipeline = DetectionPipeline([
+            GrayscaleStage(), TopHatStage(), OtsuStage(),
+            DilateStage(), ConnectedComponentStage(),
+            RectFilterStage(), MergeStage(),
+        ])
+        ctx = pipeline.run(self._make_ui_image())
+        assert len(ctx.rects) >= 1
+
+
+from cvui.detection import (
+    NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage,
+)
+
+
+class TestNestedStage:
+    def test_detects_children(self):
+        img = np.zeros((400, 600, 3), dtype=np.uint8)
+        img[:] = (30, 30, 30)
+        img[50:350, 50:550] = (60, 60, 60)
+        img[80:110, 80:200] = (180, 180, 180)
+        img[150:190, 80:120] = (160, 160, 160)
+        ctx = DetectionContext(img=img)
+        ctx.rects = [(50, 50, 550, 350)]
+        ctx = NestedStage().process(ctx)
+        assert len(ctx.rects) > 1
+
+    def test_skips_small_rects(self):
+        img = np.zeros((400, 600, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx.rects = [(10, 10, 30, 30)]  # too small for nesting
+        original_count = len(ctx.rects)
+        ctx = NestedStage().process(ctx)
+        assert len(ctx.rects) == original_count
+
+
+class TestClassifyStage:
+    def test_icon(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 40, 40)]  # 30x30 square
+        ctx = ClassifyStage().process(ctx)
+        assert ctx.classifications[0] == "icon"
+
+    def test_text(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 210, 30)]  # 200x20 wide
+        ctx = ClassifyStage().process(ctx)
+        assert ctx.classifications[0] == "text"
+
+    def test_image(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(0, 0, 500, 400)]  # large
+        ctx = ClassifyStage().process(ctx)
+        assert ctx.classifications[0] == "image"
+
+    def test_container(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 200, 100)]  # medium, not square
+        ctx = ClassifyStage().process(ctx)
+        assert ctx.classifications[0] in ("container", "element")
+
+
+class TestChannelAnalysisStage:
+    def test_detects_green_highlight(self):
+        img = np.zeros((200, 400, 3), dtype=np.uint8)
+        img[:] = (40, 40, 40)
+        img[20:50, 20:200, 1] = 150  # G channel high (BGR: index 1 = G)
+        ctx = ChannelAnalysisStage().process(DetectionContext(img=img))
+        assert len(ctx.ui_states.get("highlight", [])) >= 1
+
+    def test_detects_red_badge(self):
+        img = np.zeros((200, 400, 3), dtype=np.uint8)
+        img[:] = (40, 40, 40)
+        img[10:25, 350:370, 2] = 200  # R channel high (BGR: index 2 = R)
+        ctx = ChannelAnalysisStage().process(DetectionContext(img=img))
+        assert len(ctx.ui_states.get("badge", [])) >= 1
+
+    def test_no_false_positives_on_gray(self):
+        img = np.full((100, 100, 3), 128, dtype=np.uint8)
+        ctx = ChannelAnalysisStage().process(DetectionContext(img=img))
+        assert len(ctx.ui_states.get("highlight", [])) == 0
+        assert len(ctx.ui_states.get("badge", [])) == 0
+
+
+class TestDiffStage:
+    def test_detects_change(self):
+        prev = np.full((200, 300, 3), 40, dtype=np.uint8)
+        curr = prev.copy()
+        curr[100:150, 100:200] = 180
+        ctx = DiffStage(prev_img=prev).process(DetectionContext(img=curr))
+        assert len(ctx.rects) >= 1
+
+    def test_no_change(self):
+        img = np.full((200, 300, 3), 40, dtype=np.uint8)
+        stage = DiffStage(prev_img=img.copy())
+        ctx = stage.process(DetectionContext(img=img))
+        assert len(ctx.rects) == 0
+        assert stage.should_continue(ctx) is False
+
+    def test_no_prev_continues(self):
+        stage = DiffStage(prev_img=None)
+        ctx = stage.process(DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8)))
+        assert stage.should_continue(ctx) is True
+
+    def test_different_shape_continues(self):
+        prev = np.zeros((100, 100, 3), dtype=np.uint8)
+        curr = np.zeros((200, 200, 3), dtype=np.uint8)
+        stage = DiffStage(prev_img=prev)
+        ctx = stage.process(DetectionContext(img=curr))
+        assert stage.should_continue(ctx) is True
+
+
+from cvui.detection import (
+    OmniParserStage, GroundingDINOStage, DownscaleStage,
+    fast_pipeline, standard_pipeline, full_pipeline, grounding_pipeline,
+)
+
+
+class TestOmniParserStage:
+    def test_skips_when_not_available(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 50, 50)]
+        stage = OmniParserStage(model_path="/nonexistent", server_url="http://127.0.0.1:99999")
+        ctx = stage.process(ctx)
+        assert len(ctx.rects) >= 1  # original preserved
+
+    def test_is_detection_stage(self):
+        assert issubclass(OmniParserStage, DetectionStage)
+
+
+class TestGroundingDINOStage:
+    def test_skips_without_query(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = GroundingDINOStage(query="").process(ctx)
+        assert ctx.rects == []
+
+    def test_skips_without_transformers(self):
+        """Should not crash even if transformers is not installed."""
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = GroundingDINOStage(query="test element").process(ctx)
+        # Either finds something or gracefully returns empty
+        assert isinstance(ctx.rects, list)
+
+    def test_is_detection_stage(self):
+        assert issubclass(GroundingDINOStage, DetectionStage)
+
+
+class TestPresetPipelines:
+    def test_fast_pipeline(self):
+        p = fast_pipeline()
+        assert len(p.stages) == 6  # DownscaleStage + 5 core stages
+        assert isinstance(p.stages[0], DownscaleStage)
+
+    def test_fast_pipeline_no_scale(self):
+        p = fast_pipeline(scale=1.0)
+        assert len(p.stages) == 5  # no DownscaleStage
+
+    def test_standard_pipeline(self):
+        p = standard_pipeline()
+        assert len(p.stages) == 7  # no downscale by default
+
+    def test_standard_pipeline_with_scale(self):
+        p = standard_pipeline(scale=0.75)
+        assert len(p.stages) == 8
+        assert isinstance(p.stages[0], DownscaleStage)
+
+    def test_full_pipeline_default(self):
+        p = full_pipeline()
+        assert len(p.stages) == 10
+
+    def test_full_pipeline_with_omniparser(self):
+        p = full_pipeline(omniparser_path="/some/path")
+        assert len(p.stages) == 11
+        assert any(isinstance(s, OmniParserStage) for s in p.stages)
+
+    def test_full_pipeline_with_grounding(self):
+        p = full_pipeline(grounding_query="search box")
+        assert len(p.stages) == 11
+        assert any(isinstance(s, GroundingDINOStage) for s in p.stages)
+
+    def test_grounding_pipeline(self):
+        p = grounding_pipeline("button")
+        assert len(p.stages) == 1
+        assert isinstance(p.stages[0], GroundingDINOStage)
+
+
+from cvui.detection import ListQuantizeStage
+
+
+class TestListQuantizeStage:
+    def test_finds_items_from_highlight(self):
+        """6 equal-height items with one highlighted -> detect all 6."""
+        img = np.full((600, 400, 3), 240, dtype=np.uint8)
+        for i in range(6):
+            y = 50 + i * 80
+            img[y+10:y+30, 20:60] = (100, 100, 100)    # avatar
+            img[y+10:y+25, 70:200] = (60, 60, 60)       # name
+            img[y+30:y+42, 70:250] = (120, 120, 120)    # subtitle
+        # Highlight item 2 (y=210-290) with green bg
+        img[210:290, 0:400] = (50, 180, 80)
+        img[220:240, 20:60] = (255, 255, 255)
+        img[220:235, 70:200] = (255, 255, 255)
+
+        ctx = DetectionContext(img=img)
+        ctx = ListQuantizeStage(zone_rect=(0, 50, 400, 530)).process(ctx)
+        assert len(ctx.rects) >= 5
+
+    def test_stops_at_empty(self):
+        """3 items then blank -> no rects in blank area."""
+        img = np.full((600, 400, 3), 240, dtype=np.uint8)
+        for i in range(3):
+            y = 50 + i * 80
+            img[y+10:y+30, 20:200] = (60, 60, 60)
+            img[y+30:y+42, 20:250] = (120, 120, 120)
+        # Highlight item 1
+        img[130:210, 0:400] = (50, 180, 80)
+        img[140:160, 20:200] = (255, 255, 255)
+
+        ctx = DetectionContext(img=img)
+        ctx = ListQuantizeStage(zone_rect=(0, 50, 400, 530)).process(ctx)
+        # Should find 3, not extend into blank area
+        assert len(ctx.rects) <= 4
+
+    def test_no_highlight_uses_rects(self):
+        """No highlight -> estimate from existing rects spacing."""
+        img = np.full((400, 300, 3), 240, dtype=np.uint8)
+        for i in range(4):
+            y = 30 + i * 70
+            img[y+5:y+20, 10:100] = (60, 60, 60)
+
+        ctx = DetectionContext(img=img)
+        # Pre-populate rects (as if ConnectedComponentStage ran first)
+        ctx.rects = [
+            (10, 35, 100, 50),
+            (10, 105, 100, 120),
+            (10, 175, 100, 190),
+            (10, 245, 100, 260),
+        ]
+        ctx = ListQuantizeStage(zone_rect=(0, 30, 300, 310)).process(ctx)
+        assert len(ctx.rects) >= 4  # original rects + list items
+
+    def test_no_zone_returns_unchanged(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 50, 50)]
+        ctx = ListQuantizeStage(zone_rect=None).process(ctx)
+        assert len(ctx.rects) == 1
+
+    def test_is_detection_stage(self):
+        assert issubclass(ListQuantizeStage, DetectionStage)
