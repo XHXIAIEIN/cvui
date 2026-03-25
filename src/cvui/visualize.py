@@ -172,7 +172,13 @@ def render_annotated(
             cls = classifications.get(i, "element")
             color = CLASS_COLORS.get(cls, ELEMENT_COLOR)
 
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=ELEMENT_WIDTH)
+        # Draw with 1px padding so frame doesn't overlap content
+        pad = 1
+        dx1 = max(0, x1 - pad)
+        dy1 = max(0, y1 - pad)
+        dx2 = min(img_w, x2 + pad)
+        dy2 = min(img_h, y2 + pad)
+        draw.rectangle([dx1, dy1, dx2, dy2], outline=color, width=ELEMENT_WIDTH)
 
     return img
 
