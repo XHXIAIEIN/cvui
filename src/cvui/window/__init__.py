@@ -146,12 +146,33 @@ class Win32WindowManager(WindowManager):
 
     def capture_window(self) -> bytes | None:
         """Capture the target window using Win32 PrintWindow.
-        Works even if the window is partially or fully occluded."""
+
+        Works even if the window is behind others. If minimized, restores
+        without stealing focus (saves/restores previous foreground window).
+        """
         if not self._target:
             return None
+
+        import ctypes
+        import ctypes.wintypes
+        import time
+        user32 = ctypes.windll.user32
+
+        hwnd = self._target.hwnd
+
+        # If minimized, restore without stealing focus
+        if user32.IsIconic(hwnd):
+            prev_fg = user32.GetForegroundWindow()
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.15)
+            # Restore previous foreground window
+            if prev_fg and prev_fg != hwnd:
+                user32.SetForegroundWindow(prev_fg)
+
         self.refresh()
         if not self._target:
             return None
+
         from .capture import capture_window_png
         return capture_window_png(self._target.hwnd,
                                   self._target.width,

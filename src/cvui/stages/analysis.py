@@ -36,13 +36,22 @@ class NestedStage(DetectionStage):
         ctx.rects = new_rects
         return ctx
 
-    def _detect_sub(self, img, region, kernel_size=40):
-        """Run sub-pipeline on a region, return global-coord rects."""
+    def _detect_sub(self, img, region, kernel_size=None):
+        """Run sub-pipeline on a region, return global-coord rects.
+
+        kernel_size auto-scales with region size: smaller regions get smaller
+        kernels so small elements inside big containers aren't merged away.
+        """
         x1, y1, x2, y2 = region
         rw, rh = x2 - x1, y2 - y1
         sub_img = img[y1:y2, x1:x2]
         if sub_img.size == 0:
             return []
+
+        # Auto kernel: ~1/4 of the shorter side, clamped to [15, 60]
+        if kernel_size is None:
+            kernel_size = max(15, min(60, min(rw, rh) // 4))
+
         sub_pipeline = DetectionPipeline([
             GrayscaleStage(), TopHatStage(kernel_size=kernel_size), OtsuStage(),
             DilateStage(h_kernel=(2, 8), v_kernel=(4, 2)),

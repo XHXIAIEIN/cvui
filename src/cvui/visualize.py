@@ -96,22 +96,36 @@ def detect_elements(
     return ctx.rects
 
 
+# Colors by element classification
+CLASS_COLORS = {
+    "icon": (0, 200, 255),       # cyan
+    "text": (0, 255, 0),         # green
+    "button": (255, 200, 0),     # yellow
+    "image": (200, 100, 255),    # purple
+    "container": (255, 150, 0),  # orange
+    "element": (0, 255, 0),      # green (default)
+}
+TRUNCATED_COLOR = (255, 0, 0)    # red for edge-truncated elements
+EDGE_MARGIN = 5                  # pixels from window edge = truncated
+
+
 def render_annotated(
     screenshot: Image.Image | bytes,
     element_rects: list[tuple[int, int, int, int]] | None = None,
+    ctx: object = None,
     mode: str = "standard",
 ) -> Image.Image:
-    """Render element annotation — green boxes around detected UI components.
-
-    If element_rects is not provided, runs detect_elements() automatically.
+    """Render element annotation with color-coded types and truncation markers.
 
     Args:
         screenshot: PIL Image or PNG bytes
-        element_rects: pre-computed element bounding boxes (optional)
-        mode: detection pipeline mode ("fast", "standard", "full")
+        element_rects: pre-computed bounding boxes (simple mode)
+        ctx: DetectionContext with classifications (rich mode, overrides element_rects)
+        mode: detection pipeline mode if auto-detecting
 
-    Returns:
-        PIL Image with green bounding boxes
+    Colors:
+        cyan = icon, green = text/element, yellow = button,
+        purple = image, orange = container, red = truncated (touching edge)
     """
     if isinstance(screenshot, bytes):
         png_bytes = screenshot
@@ -123,13 +137,42 @@ def render_annotated(
         png_bytes = buf.getvalue()
 
     img = img.convert("RGB")
-
-    if element_rects is None:
-        element_rects = detect_elements(png_bytes, mode=mode)
-
+    img_w, img_h = img.size
     draw = ImageDraw.Draw(img)
-    for x1, y1, x2, y2 in element_rects:
-        draw.rectangle([x1, y1, x2, y2], outline=ELEMENT_COLOR, width=ELEMENT_WIDTH)
+
+    # Get rects and classifications
+    if ctx is not None:
+        rects = ctx.rects
+        classifications = getattr(ctx, "classifications", {})
+    elif element_rects is not None:
+        rects = element_rects
+        classifications = {}
+    else:
+        rects = detect_elements(png_bytes, mode=mode)
+        classifications = {}
+
+    for i, (x1, y1, x2, y2) in enumerate(rects):
+        ew, eh = x2 - x1, y2 - y1
+
+        # Truncated = touching edge AND looks cut off
+        # (element extends to edge but isn't a full-width/full-height bar)
+        touches_edge = (
+            x1 <= EDGE_MARGIN or y1 <= EDGE_MARGIN
+            or x2 >= img_w - EDGE_MARGIN or y2 >= img_h - EDGE_MARGIN
+        )
+        # A full-width toolbar or header touching edge is normal, not truncated
+        # Truncated = touches edge but NOT spanning the full dimension
+        is_full_width = ew > img_w * 0.85
+        is_full_height = eh > img_h * 0.85
+        truncated = touches_edge and not is_full_width and not is_full_height
+
+        if truncated:
+            color = TRUNCATED_COLOR
+        else:
+            cls = classifications.get(i, "element")
+            color = CLASS_COLORS.get(cls, ELEMENT_COLOR)
+
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=ELEMENT_WIDTH)
 
     return img
 
