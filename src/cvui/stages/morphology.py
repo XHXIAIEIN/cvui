@@ -129,14 +129,21 @@ class RectFilterStage(DetectionStage):
 
 
 class MergeStage(DetectionStage):
-    """Merge overlapping bounding rects."""
+    """Merge significantly overlapping bounding rects.
+
+    Only merges when overlap area > min_overlap_ratio of the smaller rect.
+    Prevents adjacent-but-separate elements from being swallowed.
+    """
+
+    def __init__(self, min_overlap_ratio: float = 0.3):
+        self.min_overlap_ratio = min_overlap_ratio
 
     def process(self, ctx):
-        ctx.rects = self._merge(ctx.rects)
+        ctx.rects = self._merge(ctx.rects, self.min_overlap_ratio)
         return ctx
 
     @staticmethod
-    def _merge(boxes: list[tuple]) -> list[tuple]:
+    def _merge(boxes: list[tuple], min_overlap_ratio: float = 0.3) -> list[tuple]:
         if not boxes:
             return []
         result = [list(b) for b in boxes]
@@ -153,11 +160,28 @@ class MergeStage(DetectionStage):
                     if j in used:
                         continue
                     cx1, cy1, cx2, cy2 = result[j]
-                    if max(bx1, cx1) < min(bx2, cx2) and max(by1, cy1) < min(by2, cy2):
+
+                    # Compute overlap
+                    ox1 = max(bx1, cx1)
+                    oy1 = max(by1, cy1)
+                    ox2 = min(bx2, cx2)
+                    oy2 = min(by2, cy2)
+
+                    if ox1 >= ox2 or oy1 >= oy2:
+                        continue  # no overlap
+
+                    overlap_area = (ox2 - ox1) * (oy2 - oy1)
+                    area_b = (bx2 - bx1) * (by2 - by1)
+                    area_c = (cx2 - cx1) * (cy2 - cy1)
+                    smaller_area = min(area_b, area_c)
+
+                    # Only merge if overlap is significant relative to smaller rect
+                    if smaller_area > 0 and overlap_area / smaller_area >= min_overlap_ratio:
                         bx1, by1 = min(bx1, cx1), min(by1, cy1)
                         bx2, by2 = max(bx2, cx2), max(by2, cy2)
                         used.add(j)
                         merged = True
+
                 new.append((bx1, by1, bx2, by2))
                 used.add(i)
             result = [list(b) for b in new]

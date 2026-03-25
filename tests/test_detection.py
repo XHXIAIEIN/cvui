@@ -208,12 +208,21 @@ class TestRectFilterStage:
 
 
 class TestMergeStage:
-    def test_merges_overlapping(self):
+    def test_merges_significantly_overlapping(self):
+        """Two rects with >30% overlap → merge."""
         ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
-        ctx.rects = [(10, 10, 50, 50), (30, 30, 70, 70)]
+        # 40x40 and 40x40 with 30x30 overlap = 56% → merge
+        ctx.rects = [(10, 10, 50, 50), (20, 20, 60, 60)]
         ctx = MergeStage().process(ctx)
         assert len(ctx.rects) == 1
-        assert ctx.rects[0] == (10, 10, 70, 70)
+
+    def test_keeps_slightly_overlapping(self):
+        """Two rects with <30% overlap → keep separate."""
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        # 40x40 and 40x40 with 20x20 overlap = 25% → no merge
+        ctx.rects = [(10, 10, 50, 50), (30, 30, 70, 70)]
+        ctx = MergeStage().process(ctx)
+        assert len(ctx.rects) == 2
 
     def test_keeps_separate(self):
         ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
@@ -222,11 +231,19 @@ class TestMergeStage:
         assert len(ctx.rects) == 2
 
     def test_chain_merge(self):
-        """A overlaps B, B overlaps C -> all merge into one."""
+        """Significantly overlapping chain: A→B→C all merge."""
+        ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
+        # Each 30x30 with 20x20 overlap = 44% → merge chain
+        ctx.rects = [(0, 0, 30, 30), (10, 10, 40, 40), (20, 20, 50, 50)]
+        ctx = MergeStage().process(ctx)
+        assert len(ctx.rects) == 1
+
+    def test_chain_no_merge_small_overlap(self):
+        """Slightly overlapping chain: A→B→C stay separate."""
         ctx = DetectionContext(img=np.zeros((200, 300, 3), dtype=np.uint8))
         ctx.rects = [(0, 0, 30, 30), (20, 20, 50, 50), (40, 40, 70, 70)]
         ctx = MergeStage().process(ctx)
-        assert len(ctx.rects) == 1
+        assert len(ctx.rects) == 3
 
     def test_empty(self):
         ctx = DetectionContext(img=np.zeros((10, 10, 3), dtype=np.uint8))
