@@ -196,38 +196,49 @@ class DetectionContext:
 
     @staticmethod
     def _format_by_columns(lines, rects, labels, classifications, img_w, img_h):
-        """Auto-detect layout regions and group elements spatially.
+        """Auto-detect layout regions: Header / Sidebar / Content.
 
-        Detects major vertical splits (sidebar | content) from element X
-        distribution, then detects horizontal splits (header | body) from
-        element Y distribution. Groups elements into these regions.
+        Two-pass approach:
+        1. Find horizontal split (header) from Y gaps in top area
+        2. For body elements only, find vertical split (sidebar|content)
+           from image divider lines (long vertical edges) + element X gaps
         """
         if not rects:
             lines.append("(no elements detected)")
             return
 
-        # --- Detect vertical split (sidebar | content) ---
-        # Find gaps in X coverage: sort all left edges, find largest gap
-        left_edges = sorted(set(r[0] for r in rects))
-        best_gap_x, best_gap_size = img_w // 2, 0
-        for i in range(len(left_edges) - 1):
-            gap = left_edges[i + 1] - left_edges[i]
-            if gap > best_gap_size and left_edges[i] > img_w * 0.05:
-                best_gap_size = gap
-                best_gap_x = left_edges[i + 1]
-
-        # Only use the split if the gap is significant
-        has_sidebar = best_gap_size > img_w * 0.03
-
-        # --- Detect horizontal split (header | body) ---
+        # --- Pass 1: Detect header ---
         top_edges = sorted(set(r[1] for r in rects))
-        best_gap_y, best_gap_y_size = 0, 0
-        for i in range(min(5, len(top_edges) - 1)):  # only check top area
+        header_y = 0
+        for i in range(min(8, len(top_edges) - 1)):
             gap = top_edges[i + 1] - top_edges[i]
-            if gap > best_gap_y_size and top_edges[i] < img_h * 0.15:
-                best_gap_y_size = gap
-                best_gap_y = top_edges[i + 1]
-        has_header = best_gap_y_size > img_h * 0.02
+            if gap > img_h * 0.03 and top_edges[i] < img_h * 0.2:
+                header_y = top_edges[i + 1]
+                break
+
+        # --- Pass 2: Detect sidebar in BODY elements only ---
+        body_rects_idx = [i for i, r in enumerate(rects) if r[1] >= header_y]
+        body_rects = [rects[i] for i in body_rects_idx]
+
+        sidebar_x = 0
+        if body_rects:
+            # Find largest X gap among body elements' left edges
+            body_lefts = sorted(set(r[0] for r in body_rects))
+            best_gap, best_x = 0, 0
+            for j in range(len(body_lefts) - 1):
+                gap = body_lefts[j + 1] - body_lefts[j]
+                # Sidebar split should be in left 15%-50% of window
+                if (gap > best_gap and
+                        body_lefts[j] > img_w * 0.05 and
+                        body_lefts[j] < img_w * 0.5):
+                    best_gap = gap
+                    best_x = body_lefts[j + 1]
+
+            if best_gap > img_w * 0.03:
+                sidebar_x = best_x
+
+        has_header = header_y > 0
+        has_sidebar = sidebar_x > 0
 
         # --- Assign elements to regions ---
         regions: dict[str, list[int]] = {}
@@ -235,26 +246,22 @@ class DetectionContext:
             cx = (r[0] + r[2]) // 2
             cy = (r[1] + r[3]) // 2
 
-            if has_header and cy < best_gap_y:
+            if has_header and cy < header_y:
                 region = "Header"
-            elif has_sidebar and cx < best_gap_x:
+            elif has_sidebar and cx < sidebar_x:
                 region = "Sidebar"
             else:
                 region = "Content"
 
             regions.setdefault(region, []).append(i)
 
-        # --- Format output ---
-        region_order = ["Header", "Sidebar", "Content"]
-        for region_name in region_order:
+        # --- Format ---
+        for region_name in ["Header", "Sidebar", "Content"]:
             elems = regions.get(region_name, [])
             if not elems:
                 continue
 
-            # Sort top-to-bottom, left-to-right
             elems.sort(key=lambda i: (rects[i][1], rects[i][0]))
-
-            # Compute region bounds
             rx1 = min(rects[i][0] for i in elems)
             ry1 = min(rects[i][1] for i in elems)
             rx2 = max(rects[i][2] for i in elems)
