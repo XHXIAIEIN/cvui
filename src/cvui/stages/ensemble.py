@@ -52,49 +52,46 @@ class EnsembleStage(DetectionStage):
         min_panel_area = total_area * self.panel_area_pct / 100.0
 
         # ------------------------------------------------------------------
-        # Pass 0: Saturation separation
+        # Pass 0+1: Panel detection
+        #
+        # Two strategies, pick the one that gives better results:
+        # A) Color quantize → segment by background color (best for UIs
+        #    with distinct panel colors: light theme, mixed light/dark)
+        # B) TopHat content → dilate → merge (fallback for dark-theme UIs
+        #    where panels share similar background colors)
         # ------------------------------------------------------------------
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        s_channel = hsv[:, :, 1]
-        _, ui_mask = cv2.threshold(
-            s_channel, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
-        ui_mask = cv2.morphologyEx(
-            ui_mask, cv2.MORPH_CLOSE, np.ones((10, 10), np.uint8)
-        )
-
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        filtered_gray = gray.copy()
-        filtered_gray[ui_mask == 0] = 0
 
-        ctx.layers["ui_mask"] = ui_mask
-        ctx.layers["filtered_gray"] = filtered_gray
+        color_panels = self._detect_panels_by_color(img, w, h, min_panel_area)
+        if len(color_panels) >= 2:
+            panels = color_panels
+        else:
+            # Fallback: content-based TopHat detection
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            s = hsv[:, :, 1]
+            _, ui_mask = cv2.threshold(
+                s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
+            ui_mask = cv2.morphologyEx(
+                ui_mask, cv2.MORPH_CLOSE, np.ones((10, 10), np.uint8)
+            )
+            filtered = gray.copy()
+            filtered[ui_mask == 0] = 0
+            panels = self._detect_panels_tophat(filtered, w, h, min_panel_area)
 
-        # ------------------------------------------------------------------
-        # Pass 1: Coarse detection → panels (use filtered_gray to
-        # separate UI from colorful scene backgrounds)
-        # ------------------------------------------------------------------
-        raw_panels = self._detect_panels(filtered_gray, w, h, min_panel_area)
-        # Merge nearby panels: Pass 1's dilate can fragment a single
-        # window into multiple panels. Merge vertically adjacent panels
-        # that overlap horizontally (same logical window).
-        panels = self._merge_nearby_panels(raw_panels, h)
+        panels = self._merge_nearby_panels(panels, h)
         ctx.zones = list(panels)
+        ctx.layers["gray"] = gray
 
         # ------------------------------------------------------------------
-        # Pass 2: Fine detection within each panel
-        # Use ORIGINAL gray, not filtered_gray — inside a panel we want
-        # ALL content including colored text (syntax highlighting, green
-        # terminal output, blue links). The saturation filter already
-        # did its job in Pass 1 by locating the panels.
+        # Pass 2: Fine detection within each panel (original gray)
         # ------------------------------------------------------------------
-        original_gray = gray  # unfiltered
         details = []
         text_panels = []  # panels classified as text-content areas
         self._panel_metrics = {}
         for i, panel in enumerate(panels):
             is_text, panel_details = self._detect_details_in_panel(
-                original_gray, panel
+                gray, panel
             )
             if is_text:
                 text_panels.append(panel)
@@ -123,10 +120,74 @@ class EnsembleStage(DetectionStage):
     # Pass 1: Panel detection
     # ======================================================================
 
-    def _detect_panels(
+    def _detect_panels_by_color(
+        self, img: np.ndarray, w: int, h: int, min_area: float,
+    ) -> list[tuple[int, int, int, int]]:
+        """Segment UI into panels by quantized background color.
+
+        1. Quantize image to N colors (reuses ColorQuantizeStage logic)
+        2. For each quantized color, find large connected regions
+        3. Large rectangular regions = panel backgrounds
+        """
+        import cv2
+        from PIL import Image as PILImage
+
+        n_colors = 8
+
+        # --- Quantize ---
+        pil = PILImage.fromarray(img[:, :, ::-1])
+        quantized = pil.quantize(colors=n_colors, method=PILImage.Quantize.FASTOCTREE)
+        q_indices = np.array(quantized)  # H×W index map (0..n_colors-1)
+
+        palette_data = quantized.getpalette()
+        palette = []
+        if palette_data:
+            for i in range(0, min(len(palette_data), n_colors * 3), 3):
+                palette.append((palette_data[i], palette_data[i + 1], palette_data[i + 2]))
+
+        # --- Find panel regions per color ---
+        panels = []
+        for color_idx in range(min(n_colors, len(palette))):
+            mask = (q_indices == color_idx).astype(np.uint8) * 255
+
+            # Close small gaps within panels (text holes in background)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for cnt in contours:
+                x, y, rw, rh = cv2.boundingRect(cnt)
+                area = rw * rh
+                if area < min_area:
+                    continue
+                # Skip if it's basically the whole image
+                if area > w * h * 0.85:
+                    continue
+                # Rectangularity check: contour area vs bounding rect area
+                cnt_area = cv2.contourArea(cnt)
+                if cnt_area > 0 and cnt_area / area > 0.5:
+                    panels.append((x, y, x + rw, y + rh))
+
+        # Remove panels that are fully contained in a larger panel
+        panels.sort(key=lambda p: (p[2] - p[0]) * (p[3] - p[1]), reverse=True)
+        filtered = []
+        for p in panels:
+            contained = False
+            for f in filtered:
+                if p[0] >= f[0] and p[1] >= f[1] and p[2] <= f[2] and p[3] <= f[3]:
+                    contained = True
+                    break
+            if not contained:
+                filtered.append(p)
+
+        filtered.sort(key=lambda p: (p[1], p[0]))
+        return filtered
+
+    def _detect_panels_tophat(
         self, gray: np.ndarray, w: int, h: int, min_area: float
     ) -> list[tuple[int, int, int, int]]:
-        """Coarse TopHat → Otsu → medium dilate → area filter."""
+        """Fallback panel detection: TopHat → Otsu → dilate → CC."""
         import cv2
 
         kernel = cv2.getStructuringElement(
@@ -139,8 +200,6 @@ class EnsembleStage(DetectionStage):
             fg = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
 
         _, binary = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # Medium dilate: connect text lines horizontally, titles vertically
         binary = cv2.dilate(binary, np.ones((3, 20), np.uint8), iterations=1)
         binary = cv2.dilate(binary, np.ones((10, 3), np.uint8), iterations=1)
 
@@ -152,7 +211,6 @@ class EnsembleStage(DetectionStage):
             x, y, rw, rh = cv2.boundingRect(cnt)
             if rw * rh >= min_area:
                 panels.append((x, y, x + rw, y + rh))
-
         panels.sort(key=lambda p: (p[1], p[0]))
         return panels
 
