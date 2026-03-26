@@ -524,3 +524,67 @@ class TestListQuantizeStage:
 
     def test_is_detection_stage(self):
         assert issubclass(ListQuantizeStage, DetectionStage)
+
+
+class TestToPrompt:
+    def test_basic_output(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 100, 50), (200, 200, 300, 250)]
+        prompt = ctx.to_prompt()
+        assert "800x600" in prompt
+        assert "2 elements" in prompt
+
+    def test_with_classifications(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 40, 40), (100, 100, 300, 120)]
+        ctx.classifications = {0: "icon", 1: "text"}
+        prompt = ctx.to_prompt()
+        assert "[icon]" in prompt
+        assert "[text]" in prompt
+
+    def test_with_ocr(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 200, 50)]
+        ocr = [(20, 15, 80, 40, "Hello"), (90, 15, 180, 40, "World")]
+        prompt = ctx.to_prompt(ocr_lines=ocr)
+        assert "HelloWorld" in prompt
+        assert "OCR" in prompt
+
+    def test_deduplication(self):
+        """Parent with children inside should be removed."""
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        # Parent (0,0)-(400,300) contains two children
+        ctx.rects = [(0, 0, 400, 300), (10, 10, 100, 50), (200, 200, 300, 250)]
+        prompt = ctx.to_prompt()
+        # Parent should be deduplicated, only 2 children remain
+        assert "2 elements" in prompt
+
+    def test_empty(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        prompt = ctx.to_prompt()
+        assert "0 elements" in prompt
+
+
+class TestToReport:
+    def test_returns_dict(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 100, 50)]
+        report = ctx.to_report()
+        assert isinstance(report, dict)
+        assert report["window"]["width"] == 800
+        assert report["window"]["height"] == 600
+
+    def test_elements_in_report(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.rects = [(10, 10, 100, 50), (200, 200, 300, 250)]
+        report = ctx.to_report()
+        # Deduplicated count
+        assert len(report["elements"]) <= 2
+
+    def test_theme_detection(self):
+        # Dark image
+        dark = DetectionContext(img=np.full((100, 100, 3), 30, dtype=np.uint8))
+        assert dark.to_report()["window"]["theme"] == "dark"
+        # Light image
+        light = DetectionContext(img=np.full((100, 100, 3), 200, dtype=np.uint8))
+        assert light.to_report()["window"]["theme"] == "light"

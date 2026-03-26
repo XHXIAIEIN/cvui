@@ -127,9 +127,13 @@ class DetectionContext:
             for ox1, oy1, ox2, oy2, text in ocr_lines:
                 ocx, ocy = (ox1 + ox2) // 2, (oy1 + oy2) // 2
                 if rx1 <= ocx <= rx2 and ry1 <= ocy <= ry2:
+                    # Skip noise: single punctuation, stray symbols
+                    if len(text) <= 1 and not text.isalnum():
+                        continue
                     texts.append(text)
             if texts:
-                label = "".join(texts[:6])
+                # Join without spaces for CJK, with spaces for Latin
+                label = "".join(t.strip() for t in texts[:6])
                 if len(texts) > 6:
                     label += "..."
                 labels[i] = label
