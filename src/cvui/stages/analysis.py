@@ -341,3 +341,65 @@ class ListQuantizeStage(DetectionStage):
             return False
         density = np.count_nonzero(region > 10) / region.size
         return density > self.min_density
+
+
+class LayoutPatternStage(DetectionStage):
+    """Identify common UI layout patterns from element distribution.
+
+    Known patterns (CSS Grid/Flexbox inspired):
+    - "header+body": top strip + main area
+    - "header+sidebar+content": top strip + left nav + right content
+    - "sidebar+content": left nav + right content (no header)
+    - "toolbar+canvas": top tools + main canvas area
+    - "single-column": simple vertical stack
+    - "grid": regular grid of similar-sized elements
+
+    The detected pattern is stored in ctx.ui_states["layout_pattern"].
+    Does NOT modify rects — purely informational for LLM prompt.
+    """
+
+    def process(self, ctx):
+        if not ctx.rects:
+            ctx.ui_states["layout_pattern"] = "empty"
+            return ctx
+
+        h, w = ctx.height, ctx.width
+
+        # Classify each rect's position
+        top_elems = [r for r in ctx.rects if (r[1] + r[3]) / 2 < h * 0.12]
+        left_elems = [r for r in ctx.rects if (r[0] + r[2]) / 2 < w * 0.25 and (r[1] + r[3]) / 2 >= h * 0.12]
+        right_elems = [r for r in ctx.rects if (r[0] + r[2]) / 2 >= w * 0.25 and (r[1] + r[3]) / 2 >= h * 0.12]
+
+        has_header = len(top_elems) >= 3
+        has_sidebar = len(left_elems) >= 3 and len(right_elems) >= 2
+
+        # Check for grid pattern: many rects of similar size with spread across both axes
+        if len(ctx.rects) > 8:
+            areas = [(r[2]-r[0]) * (r[3]-r[1]) for r in ctx.rects]
+            median_area = sorted(areas)[len(areas)//2]
+            similar = sum(1 for a in areas if 0.5 * median_area < a < 2 * median_area)
+            x_centers = [(r[0] + r[2]) / 2 for r in ctx.rects]
+            x_spread_ratio = (max(x_centers) - min(x_centers)) / max(w, 1)
+            is_grid = similar > len(ctx.rects) * 0.6 and x_spread_ratio > 0.3
+        else:
+            is_grid = False
+
+        # Determine pattern
+        if is_grid:
+            pattern = "grid"
+        elif has_header and has_sidebar:
+            pattern = "header+sidebar+content"
+        elif has_header:
+            pattern = "header+body"
+        elif has_sidebar:
+            pattern = "sidebar+content"
+        else:
+            # Check if mostly vertical stack
+            x_spread = max(r[2] for r in ctx.rects) - min(r[0] for r in ctx.rects)
+            if x_spread < w * 0.5:
+                pattern = "single-column"
+            else:
+                pattern = "free-form"
+
+        ctx.ui_states["layout_pattern"] = pattern
+        return ctx

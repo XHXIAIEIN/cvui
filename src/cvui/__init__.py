@@ -22,7 +22,7 @@ from .detection import (
     DownscaleStage, GrayscaleStage, TopHatStage, OtsuStage,
     DilateStage, ConnectedComponentStage, RectFilterStage, MergeStage,
     NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage,
-    ListQuantizeStage, OmniParserStage, GroundingDINOStage,
+    ListQuantizeStage, LayoutPatternStage, OmniParserStage, GroundingDINOStage,
     fast_pipeline, standard_pipeline, full_pipeline, grounding_pipeline,
 )
 from .stages.advanced import (

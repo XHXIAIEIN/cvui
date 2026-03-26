@@ -443,16 +443,16 @@ class TestPresetPipelines:
 
     def test_full_pipeline_default(self):
         p = full_pipeline()
-        assert len(p.stages) == 10
+        assert len(p.stages) == 11
 
     def test_full_pipeline_with_omniparser(self):
         p = full_pipeline(omniparser_path="/some/path")
-        assert len(p.stages) == 11
+        assert len(p.stages) == 12
         assert any(isinstance(s, OmniParserStage) for s in p.stages)
 
     def test_full_pipeline_with_grounding(self):
         p = full_pipeline(grounding_query="search box")
-        assert len(p.stages) == 11
+        assert len(p.stages) == 12
         assert any(isinstance(s, GroundingDINOStage) for s in p.stages)
 
     def test_grounding_pipeline(self):
@@ -722,3 +722,41 @@ class TestTrackingStage:
         ctx = DetectionContext(img=prev.copy())
         ctx = stage.process(ctx)
         assert stage.should_continue(ctx) is False  # found tracks, skip full detection
+
+
+from cvui.stages.analysis import LayoutPatternStage
+
+
+class TestLayoutPatternStage:
+    def test_detects_header_sidebar_content(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        # Header elements (top)
+        ctx.rects = [
+            (10, 10, 100, 40), (200, 10, 300, 40), (400, 10, 500, 40),  # header
+            (10, 100, 150, 200), (10, 250, 150, 350), (10, 400, 150, 500),  # sidebar
+            (200, 100, 700, 200), (200, 250, 700, 350),  # content
+        ]
+        ctx = LayoutPatternStage().process(ctx)
+        assert ctx.ui_states["layout_pattern"] == "header+sidebar+content"
+
+    def test_detects_single_column(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        # Vertically stacked, narrow
+        ctx.rects = [(300, y, 500, y+30) for y in range(50, 500, 50)]
+        ctx = LayoutPatternStage().process(ctx)
+        assert ctx.ui_states["layout_pattern"] == "single-column"
+
+    def test_detects_grid(self):
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        # Grid of similar-sized elements
+        ctx.rects = [(x, y, x+80, y+80) for x in range(50, 700, 100) for y in range(50, 500, 100)]
+        ctx = LayoutPatternStage().process(ctx)
+        assert ctx.ui_states["layout_pattern"] == "grid"
+
+    def test_empty(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = LayoutPatternStage().process(ctx)
+        assert ctx.ui_states["layout_pattern"] == "empty"
+
+    def test_is_stage(self):
+        assert issubclass(LayoutPatternStage, DetectionStage)

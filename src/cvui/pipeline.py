@@ -77,6 +77,10 @@ class DetectionContext:
         lines.append(f"Window: {w}x{h}, {theme} theme, {len(rects)} elements")
         if ocr_lines:
             lines.append(f"OCR: {len(ocr_lines)} words (approximate, may contain errors)")
+        # Layout pattern (if detected by LayoutPatternStage)
+        layout = self.ui_states.get("layout_pattern")
+        if layout:
+            lines.append(f"Layout: {layout}")
         lines.append("")
 
         # Step 5: Group into zones or auto-detect columns

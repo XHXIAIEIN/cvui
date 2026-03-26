@@ -1,7 +1,7 @@
 """Detection stages and preset pipelines."""
 from .preprocessing import DownscaleStage, GrayscaleStage, TopHatStage, OtsuStage
 from .morphology import DilateStage, ConnectedComponentStage, RectFilterStage, MergeStage
-from .analysis import NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage, ListQuantizeStage
+from .analysis import NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage, ListQuantizeStage, LayoutPatternStage
 from .ml import OmniParserStage, GroundingDINOStage
 from .advanced import (
     MultiFrameAccumulatorStage, ColorQuantizeStage,
@@ -45,7 +45,7 @@ def full_pipeline(omniparser_path: str = "", grounding_query: str = "") -> Detec
         GrayscaleStage(), TopHatStage(), OtsuStage(),
         DilateStage(), ConnectedComponentStage(),
         RectFilterStage(), MergeStage(),
-        NestedStage(), ClassifyStage(), ChannelAnalysisStage(),
+        NestedStage(), ClassifyStage(), LayoutPatternStage(), ChannelAnalysisStage(),
     ]
     if omniparser_path:
         stages.append(OmniParserStage(model_path=omniparser_path))
@@ -73,7 +73,7 @@ def game_pipeline() -> DetectionPipeline:
 __all__ = [
     "DownscaleStage", "GrayscaleStage", "TopHatStage", "OtsuStage",
     "DilateStage", "ConnectedComponentStage", "RectFilterStage", "MergeStage",
-    "NestedStage", "ClassifyStage", "ChannelAnalysisStage", "DiffStage", "ListQuantizeStage",
+    "NestedStage", "ClassifyStage", "ChannelAnalysisStage", "DiffStage", "ListQuantizeStage", "LayoutPatternStage",
     "OmniParserStage", "GroundingDINOStage",
     "DetectionPipeline", "DetectionStage",
     "MultiFrameAccumulatorStage", "ColorQuantizeStage",
