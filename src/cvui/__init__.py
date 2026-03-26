@@ -28,6 +28,7 @@ from .detection import (
 from .stages.advanced import (
     MultiFrameAccumulatorStage, ColorQuantizeStage,
     MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
+    SaturationFilterStage,
 )
 from .stages import game_pipeline
 from .visualize import (

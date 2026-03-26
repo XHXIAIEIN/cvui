@@ -9,7 +9,8 @@ from cvui.stages import (
     DilateStage, ConnectedComponentStage, RectFilterStage, MergeStage,
     NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage,
     ListQuantizeStage, LayoutPatternStage, OmniParserStage, GroundingDINOStage,
-    fast_pipeline, standard_pipeline, full_pipeline, grounding_pipeline,
+    SaturationFilterStage,
+    fast_pipeline, standard_pipeline, full_pipeline, grounding_pipeline, game_pipeline,
 )
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "DilateStage", "ConnectedComponentStage", "RectFilterStage", "MergeStage",
     "NestedStage", "ClassifyStage", "ChannelAnalysisStage", "DiffStage",
     "ListQuantizeStage", "LayoutPatternStage", "OmniParserStage", "GroundingDINOStage",
-    "fast_pipeline", "standard_pipeline", "full_pipeline", "grounding_pipeline",
+    "SaturationFilterStage",
+    "fast_pipeline", "standard_pipeline", "full_pipeline", "grounding_pipeline", "game_pipeline",
 ]

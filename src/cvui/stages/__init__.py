@@ -6,6 +6,7 @@ from .ml import OmniParserStage, GroundingDINOStage
 from .advanced import (
     MultiFrameAccumulatorStage, ColorQuantizeStage,
     MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
+    SaturationFilterStage,
 )
 from cvui.pipeline import DetectionPipeline, DetectionStage
 
@@ -60,13 +61,14 @@ def grounding_pipeline(query: str, box_threshold: float = 0.3) -> DetectionPipel
 
 
 def game_pipeline() -> DetectionPipeline:
-    """For games: quantize → detect → classify. ~30ms."""
+    """For games: saturation filter → detect → classify. Filters scene textures."""
     return DetectionPipeline([
-        ColorQuantizeStage(n_colors=8),
-        GrayscaleStage(), TopHatStage(), OtsuStage(),
+        GrayscaleStage(),
+        SaturationFilterStage(),  # mask out high-saturation scene
+        TopHatStage(), OtsuStage(),
         DilateStage(), ConnectedComponentStage(),
         RectFilterStage(), MergeStage(),
-        ClassifyStage(),
+        ClassifyStage(), LayoutPatternStage(),
     ])
 
 
@@ -78,6 +80,7 @@ __all__ = [
     "DetectionPipeline", "DetectionStage",
     "MultiFrameAccumulatorStage", "ColorQuantizeStage",
     "MultiColorSpaceStage", "GradientDetectorStage", "TrackingStage",
+    "SaturationFilterStage",
     "fast_pipeline", "standard_pipeline", "full_pipeline", "grounding_pipeline",
     "game_pipeline",
 ]

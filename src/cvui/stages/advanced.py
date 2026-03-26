@@ -218,3 +218,41 @@ class TrackingStage(DetectionStage):
     def should_continue(self, ctx):
         # If tracking found elements, skip full detection
         return len(ctx.rects) == 0
+
+
+class SaturationFilterStage(DetectionStage):
+    """Filter out high-saturation scene regions, keep low-saturation UI.
+
+    Game UIs typically use desaturated colors (gray/black semi-transparent
+    panels, white text). Game scenes have rich, saturated colors. By masking
+    out high-saturation pixels before detection, scene textures (stairs,
+    walls, foliage) are excluded while UI elements are preserved.
+
+    Uses Otsu auto-threshold on the HSV saturation channel.
+    """
+
+    def process(self, ctx):
+        import cv2
+
+        hsv = cv2.cvtColor(ctx.img, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]  # saturation channel
+
+        # Otsu on saturation: BINARY_INV so low sat (UI) = 255, high sat (scene) = 0
+        _, ui_mask = cv2.threshold(s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Close gaps in UI panels
+        ui_mask = cv2.morphologyEx(ui_mask, cv2.MORPH_CLOSE, np.ones((10, 10), np.uint8))
+
+        # Apply: if gray exists, zero out scene pixels
+        if ctx.gray is not None:
+            ctx.gray[ui_mask == 0] = 0
+        else:
+            gray = cv2.cvtColor(ctx.img, cv2.COLOR_BGR2GRAY)
+            gray[ui_mask == 0] = 0
+            ctx.gray = gray
+
+        # Store mask info
+        total = ui_mask.size
+        ui_pct = np.count_nonzero(ui_mask) * 100 / max(total, 1)
+        ctx.ui_states["saturation_filter"] = f"{ui_pct:.0f}% UI, {100-ui_pct:.0f}% scene"
+        return ctx

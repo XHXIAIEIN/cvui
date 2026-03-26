@@ -760,3 +760,46 @@ class TestLayoutPatternStage:
 
     def test_is_stage(self):
         assert issubclass(LayoutPatternStage, DetectionStage)
+
+
+# ---------------------------------------------------------------------------
+# SaturationFilterStage tests
+# ---------------------------------------------------------------------------
+
+import cv2
+from cvui.stages.advanced import SaturationFilterStage
+
+
+class TestSaturationFilterStage:
+    def test_masks_saturated_regions(self):
+        """High-saturation pixels should be zeroed in gray."""
+        img = np.zeros((200, 400, 3), dtype=np.uint8)
+        # Left: desaturated UI (gray)
+        img[:, :200] = (128, 128, 128)
+        # Right: saturated scene (bright green)
+        img[:, 200:] = (0, 200, 0)
+        ctx = DetectionContext(img=img)
+        ctx.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        ctx = SaturationFilterStage().process(ctx)
+        # Right side (scene) should be zeroed
+        assert ctx.gray[100, 300] == 0
+        # Left side (UI) should be preserved
+        assert ctx.gray[100, 100] > 0
+
+    def test_preserves_ui_elements(self):
+        """Low-saturation text on dark background should survive."""
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        img[:] = (30, 30, 30)  # dark bg
+        img[30:50, 30:170] = (200, 200, 200)  # white text (low sat)
+        ctx = DetectionContext(img=img)
+        ctx = SaturationFilterStage().process(ctx)
+        assert ctx.gray is not None
+        assert ctx.gray[40, 100] > 0  # text preserved
+
+    def test_stores_stats(self):
+        ctx = DetectionContext(img=np.full((100, 100, 3), 128, dtype=np.uint8))
+        ctx = SaturationFilterStage().process(ctx)
+        assert "saturation_filter" in ctx.ui_states
+
+    def test_is_stage(self):
+        assert issubclass(SaturationFilterStage, DetectionStage)
