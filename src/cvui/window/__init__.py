@@ -178,6 +178,20 @@ class Win32WindowManager(WindowManager):
                                   self._target.width,
                                   self._target.height)
 
+    def capture_window_wgc(self) -> bytes | None:
+        """Capture using Windows.Graphics.Capture (background, DirectX-compatible).
+
+        Falls back to PrintWindow if windows-capture library not available.
+        """
+        if not self._target:
+            return None
+        from .wgc_capture import capture_window_wgc
+        png = capture_window_wgc(self._target.title)
+        if png:
+            return png
+        # Fallback to PrintWindow
+        return self.capture_window()
+
     # ------------------------------------------------------------------
     # Background input (no foreground focus needed)
     # ------------------------------------------------------------------

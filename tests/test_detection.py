@@ -815,27 +815,40 @@ class TestSaturationFilterStage:
 
 
 # ---------------------------------------------------------------------------
-# ZoneDetectorStage tests
+# ZoneDetectorStage tests (v2 — coarse TopHat)
 # ---------------------------------------------------------------------------
 
+import cv2
 from cvui.stages.advanced import ZoneDetectorStage
 
 
-class TestZoneDetectorStage:
-    def test_finds_zones_from_ui_mask(self):
-        """UI mask with two bright clusters -> 2 zones."""
-        mask = np.zeros((600, 800), dtype=np.uint8)
-        mask[50:200, 50:300] = 255   # left panel
-        mask[50:200, 400:750] = 255  # right panel
-        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
-        ctx.layers["ui_mask"] = mask
-        ctx = ZoneDetectorStage().process(ctx)
-        assert len(ctx.zones) == 2
+class TestZoneDetectorStageV2:
+    def test_finds_panels_from_content(self):
+        """Image with two content clusters -> 2 zones."""
+        img = np.zeros((600, 800, 3), dtype=np.uint8)
+        img[:] = (20, 20, 20)  # dark bg
+        # Left panel: white text
+        img[50:70, 50:250] = (200, 200, 200)
+        img[80:100, 50:200] = (180, 180, 180)
+        img[110:130, 50:220] = (190, 190, 190)
+        # Right panel: white text
+        img[50:70, 450:700] = (200, 200, 200)
+        img[80:100, 450:650] = (180, 180, 180)
+        ctx = DetectionContext(img=img)
+        ctx.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        ctx = ZoneDetectorStage(kernel_size=60).process(ctx)
+        assert len(ctx.zones) >= 2
 
-    def test_no_mask_passthrough(self):
-        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+    def test_excludes_full_window_zone(self):
+        """Zone covering >80% of image should be excluded."""
+        img = np.full((200, 300, 3), 200, dtype=np.uint8)  # all bright
+        ctx = DetectionContext(img=img)
+        ctx.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         ctx = ZoneDetectorStage().process(ctx)
-        assert ctx.zones == []
+        # No zone should cover >80%
+        for z in ctx.zones:
+            area = (z[2]-z[0]) * (z[3]-z[1])
+            assert area < 200 * 300 * 0.8
 
     def test_is_stage(self):
         assert issubclass(ZoneDetectorStage, DetectionStage)

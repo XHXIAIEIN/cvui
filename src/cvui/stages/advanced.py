@@ -262,53 +262,67 @@ class SaturationFilterStage(DetectionStage):
 
 
 class ZoneDetectorStage(DetectionStage):
-    """Detect UI panel zones from content distribution in ui_mask.
+    """Detect UI panel zones from content distribution.
 
-    Uses content heat map: gaussian blur on foreground pixels,
-    threshold to find dense clusters = UI panels.
-    Writes results to ctx.zones.
+    Uses coarse TopHat on saturation-filtered gray to find large content
+    clusters = UI panels. Subsequent stages only detect within these zones.
+
+    Strategy:
+    1. TopHat with large kernel (~120) extracts coarse content blocks
+    2. Otsu thresholds
+    3. Heavy dilation merges text lines into panel-sized blocks
+    4. Connected components = zones
+    5. Filter: skip zones covering >80% of image (that's the whole window)
     """
 
-    def __init__(self, blur_size: int = 81, threshold: int = 25,
-                 min_width: int = 100, min_height: int = 50):
-        self.blur_size = blur_size
-        self.threshold = threshold
+    def __init__(self, kernel_size: int = 120, max_area_ratio: float = 0.8,
+                 min_width: int = 80, min_height: int = 40):
+        self.kernel_size = kernel_size
+        self.max_area_ratio = max_area_ratio
         self.min_width = min_width
         self.min_height = min_height
 
     def process(self, ctx):
         import cv2
 
-        # Use ui_mask if available, otherwise use gray/foreground
-        source = ctx.layers.get("ui_mask")
-        if source is None:
-            source = ctx.layers.get("foreground")
-        if source is None:
-            source = ctx.gray
-        if source is None:
-            return ctx
+        # Use saturation-filtered gray if available, else plain gray
+        gray = ctx.layers.get("gray")
+        if gray is None:
+            gray = cv2.cvtColor(ctx.img, cv2.COLOR_BGR2GRAY)
 
-        # Create heat map from content distribution
-        heat = cv2.GaussianBlur(source.astype(np.float32),
-                                (self.blur_size, self.blur_size), 0)
-        if heat.max() > 0:
-            heat_norm = (heat / heat.max() * 255).astype(np.uint8)
+        h, w = gray.shape[:2]
+        total_area = h * w
+
+        # Coarse TopHat — large kernel to extract panel-sized content blocks
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                           (self.kernel_size, self.kernel_size))
+        median = float(np.median(gray[gray > 0])) if np.any(gray > 0) else float(np.median(gray))
+        if median >= 128:
+            coarse = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
         else:
-            return ctx
+            coarse = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
 
-        # Threshold to find panels
-        _, panel_mask = cv2.threshold(heat_norm, self.threshold, 255, cv2.THRESH_BINARY)
-        panel_mask = cv2.morphologyEx(panel_mask, cv2.MORPH_CLOSE,
-                                       np.ones((30, 30), np.uint8))
+        # Otsu threshold
+        _, binary = cv2.threshold(coarse, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Find contours = zones
-        contours, _ = cv2.findContours(panel_mask, cv2.RETR_EXTERNAL,
-                                        cv2.CHAIN_APPROX_SIMPLE)
+        # Heavy dilation to merge text lines into panel blocks
+        binary = cv2.dilate(binary, np.ones((20, 40), np.uint8), iterations=1)
+        binary = cv2.dilate(binary, np.ones((30, 10), np.uint8), iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
+
+        # Find zones
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            if w >= self.min_width and h >= self.min_height:
-                ctx.zones.append((x, y, x + w, y + h))
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            area = rw * rh
+            # Skip too small
+            if rw < self.min_width or rh < self.min_height:
+                continue
+            # Skip if covers almost entire image (that's the whole window, not a zone)
+            if area > total_area * self.max_area_ratio:
+                continue
+            ctx.zones.append((x, y, x + rw, y + rh))
 
         ctx.zones.sort(key=lambda z: (z[1], z[0]))
-        ctx.layers["zones_mask"] = panel_mask
+        ctx.layers["zones_mask"] = binary
         return ctx
