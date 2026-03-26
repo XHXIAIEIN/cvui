@@ -74,7 +74,11 @@ class EnsembleStage(DetectionStage):
         # Pass 1: Coarse detection → panels (use filtered_gray to
         # separate UI from colorful scene backgrounds)
         # ------------------------------------------------------------------
-        panels = self._detect_panels(filtered_gray, w, h, min_panel_area)
+        raw_panels = self._detect_panels(filtered_gray, w, h, min_panel_area)
+        # Merge nearby panels: Pass 1's dilate can fragment a single
+        # window into multiple panels. Merge vertically adjacent panels
+        # that overlap horizontally (same logical window).
+        panels = self._merge_nearby_panels(raw_panels, h)
         ctx.zones = list(panels)
 
         # ------------------------------------------------------------------
@@ -151,6 +155,59 @@ class EnsembleStage(DetectionStage):
 
         panels.sort(key=lambda p: (p[1], p[0]))
         return panels
+
+    @staticmethod
+    def _merge_nearby_panels(
+        panels: list[tuple[int, int, int, int]], img_h: int
+    ) -> list[tuple[int, int, int, int]]:
+        """Merge vertically adjacent panels that overlap horizontally.
+
+        A single window (terminal, editor) can be fragmented into multiple
+        panels by Pass 1's dilate. Merge panels that are:
+        - Vertically close (gap < 5% of image height)
+        - Horizontally overlapping (shared X range > 50% of narrower panel)
+        """
+        if len(panels) <= 1:
+            return panels
+
+        max_gap = max(30, img_h // 20)  # 5% of image height
+        merged = [list(p) for p in panels]
+        changed = True
+
+        while changed:
+            changed = False
+            new = []
+            used = set()
+            for i in range(len(merged)):
+                if i in used:
+                    continue
+                ax1, ay1, ax2, ay2 = merged[i]
+                for j in range(i + 1, len(merged)):
+                    if j in used:
+                        continue
+                    bx1, by1, bx2, by2 = merged[j]
+                    # Vertical gap
+                    v_gap = max(0, max(by1 - ay2, ay1 - by2))
+                    if v_gap > max_gap:
+                        continue
+                    # Horizontal overlap
+                    ox = max(0, min(ax2, bx2) - max(ax1, bx1))
+                    narrower_w = min(ax2 - ax1, bx2 - bx1)
+                    if narrower_w > 0 and ox / narrower_w >= 0.5:
+                        # Merge
+                        ax1 = min(ax1, bx1)
+                        ay1 = min(ay1, by1)
+                        ax2 = max(ax2, bx2)
+                        ay2 = max(ay2, by2)
+                        used.add(j)
+                        changed = True
+                new.append((ax1, ay1, ax2, ay2))
+                used.add(i)
+            merged = [list(p) for p in new]
+
+        result = [tuple(p) for p in merged]
+        result.sort(key=lambda p: (p[1], p[0]))
+        return result
 
     # ======================================================================
     # Pass 2: Fine detection inside panels
@@ -238,10 +295,11 @@ class EnsembleStage(DetectionStage):
         """
         import cv2
 
-        # Horizontal dilate kernel: connect chars within words.
-        # Cap to ~15% of panel width.
-        max_h_dilate = max(8, rw // 7)
-        h_dilate_w = max(8, min(max_h_dilate, int(char_w * 1.2)))
+        # Horizontal dilate: connect characters into word/phrase blocks.
+        # Use line_height as reference — in most UIs, word spacing ≈ char height.
+        # Cap to 25% of panel width to avoid merging across columns.
+        max_h_dilate = max(8, rw // 4)
+        h_dilate_w = max(8, min(max_h_dilate, int(line_h * 1.5)))
         h_dilate_h = max(2, min(6, line_h // 6))
         h_kernel = np.ones((h_dilate_h, h_dilate_w), np.uint8)
 
@@ -413,7 +471,7 @@ class EnsembleStage(DetectionStage):
         # (paragraph breaks, section headers). Instead of requiring ALL
         # gaps to be uniform (low CV), check if MOST gaps are near the
         # median — tolerates blank lines and section breaks.
-        if not result["is_text_content"] and len(lines) >= 8:
+        if not result["is_text_content"] and len(lines) >= 6:
             if len(lines) >= 2:
                 gaps_arr = np.array(
                     [lines[i + 1] - lines[i] for i in range(len(lines) - 1)]
