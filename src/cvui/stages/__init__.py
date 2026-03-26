@@ -61,14 +61,21 @@ def grounding_pipeline(query: str, box_threshold: float = 0.3) -> DetectionPipel
 
 
 def game_pipeline() -> DetectionPipeline:
-    """For games: saturation filter → zone detect → detect within zones."""
+    """For games: saturation filter → large dilate → strict filter.
+
+    Games have noisy backgrounds. Uses:
+    - SaturationFilter to mask out colorful scene regions
+    - Large dilate kernels to merge UI text blocks into panels
+    - High min_area filter to remove scene debris
+    """
     return DetectionPipeline([
         GrayscaleStage(),
         SaturationFilterStage(),
-        ZoneDetectorStage(),        # find UI panels from content heat
         TopHatStage(), OtsuStage(),
-        DilateStage(), ConnectedComponentStage(),  # only in zones
-        RectFilterStage(), MergeStage(),
+        DilateStage(h_kernel=(3, 20), v_kernel=(10, 3)),  # medium-large for game UI
+        ConnectedComponentStage(),
+        RectFilterStage(min_area=800),  # filter small scene debris
+        MergeStage(),
         ClassifyStage(), LayoutPatternStage(),
     ])
 
