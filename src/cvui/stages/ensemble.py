@@ -57,24 +57,36 @@ class EnsembleStage(DetectionStage):
         ctx.layers["gray"] = gray
 
         # ==================================================================
-        # Phase 1: Detect panels (coarse regions)
+        # Phase 1: Detect panels
+        #
+        # Try multiple strategies. Each strategy returns candidate panels.
+        # Filter out "whole image" panels (>80% area = not a real panel).
+        # Use first strategy that produces >=2 meaningful panels.
         # ==================================================================
-        color_panels = self._detect_panels_by_color(img, w, h, min_panel_area)
-        if len(color_panels) >= 2:
-            panels = color_panels
-        else:
-            s = hsv[:, :, 1]
-            _, ui_mask = cv2.threshold(
-                s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-            )
-            ui_mask = cv2.morphologyEx(
-                ui_mask, cv2.MORPH_CLOSE, np.ones((10, 10), np.uint8)
-            )
-            filtered = gray.copy()
-            filtered[ui_mask == 0] = 0
-            panels = self._detect_panels_tophat(filtered, w, h, min_panel_area)
+        panels = []
+        for detect_fn in [
+            lambda: self._detect_panels_by_brightness(gray, w, h, min_panel_area),
+            lambda: self._detect_panels_by_variance(gray, w, h, min_panel_area),
+            lambda: self._detect_panels_tophat(gray, w, h, min_panel_area),
+        ]:
+            candidates = detect_fn()
+            # Drop panels that cover >80% of image (that's the whole screen)
+            candidates = [
+                p for p in candidates
+                if (p[2] - p[0]) * (p[3] - p[1]) <= total_area * 0.80
+            ]
+            if len(candidates) >= 2:
+                panels = candidates
+                break
+            elif len(candidates) == 1 and not panels:
+                panels = candidates  # keep best single panel
 
         panels = self._merge_nearby_panels(panels, h)
+
+        # Fallback: if nothing segmented, use whole image
+        if not panels and w >= 100 and h >= 100:
+            panels = [(0, 0, w, h)]
+
         ctx.zones = list(panels)
 
         # ==================================================================
@@ -187,6 +199,105 @@ class EnsembleStage(DetectionStage):
 
         filtered.sort(key=lambda p: (p[1], p[0]))
         return filtered
+
+    def _detect_panels_by_brightness(
+        self, gray: np.ndarray, w: int, h: int, min_area: float
+    ) -> list[tuple[int, int, int, int]]:
+        """Detect panels by brightness — dark regions are UI overlays.
+
+        Uses block-wise median brightness on a grid. Blocks significantly
+        darker than the image median are UI overlay candidates. Connected
+        dark blocks form panels.
+
+        This avoids Otsu's issue with skewed distributions (e.g., 76%
+        dark pixels where Otsu threshold doesn't separate UI from scene).
+        """
+        import cv2
+
+        # Downsample to a block grid for speed (~30x30 blocks)
+        block_h = max(1, h // 30)
+        block_w = max(1, w // 30)
+        n_rows = h // block_h
+        n_cols = w // block_w
+        if n_rows < 3 or n_cols < 3:
+            return []
+
+        # Compute per-block median brightness
+        block_medians = np.zeros((n_rows, n_cols), dtype=np.float32)
+        for r in range(n_rows):
+            for c in range(n_cols):
+                block = gray[r*block_h:(r+1)*block_h, c*block_w:(c+1)*block_w]
+                block_medians[r, c] = float(np.median(block))
+
+        # Dark threshold: blocks below global P30 are "dark"
+        threshold = float(np.percentile(block_medians, 30))
+        # But only if there's meaningful contrast (bright areas exist)
+        global_median = float(np.median(block_medians))
+        if threshold > global_median * 0.8:
+            return []  # no clear dark/bright separation
+
+        dark_blocks = (block_medians <= threshold).astype(np.uint8) * 255
+
+        # Morphology on block grid: close small gaps
+        dark_blocks = cv2.morphologyEx(
+            dark_blocks, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+        )
+
+        # Find connected dark regions
+        contours, _ = cv2.findContours(
+            dark_blocks, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        panels = []
+        for cnt in contours:
+            x, y, rw, rh = cv2.boundingRect(cnt)
+            # Map back to pixel coordinates
+            px1, py1 = x * block_w, y * block_h
+            px2, py2 = min((x + rw) * block_w, w), min((y + rh) * block_h, h)
+            area = (px2 - px1) * (py2 - py1)
+            if area < min_area:
+                continue
+            if area > w * h * 0.85:
+                continue
+            panels.append((px1, py1, px2, py2))
+
+        panels.sort(key=lambda p: (p[1], p[0]))
+        return panels
+
+    def _detect_panels_by_variance(
+        self, gray: np.ndarray, w: int, h: int, min_area: float
+    ) -> list[tuple[int, int, int, int]]:
+        """Detect panels by local brightness variance.
+
+        Reuses GradientDetectorStage insight: UI panels are LOW variance
+        (solid/flat backgrounds), scene textures are HIGH variance.
+
+        1. Compute local variance map (same as GradientDetectorStage)
+        2. Low-variance mask = potential UI regions
+        3. Close gaps + TopHat on masked gray → panel content
+        4. Dilate + CC → panel boundaries
+        """
+        import cv2
+
+        # Local variance (from GradientDetectorStage, kernel=15)
+        gray_f = gray.astype(np.float32)
+        k = np.ones((15, 15), np.float32) / 225
+        mean = cv2.filter2D(gray_f, -1, k)
+        sq_mean = cv2.filter2D(gray_f ** 2, -1, k)
+        local_var = np.clip(sq_mean - mean ** 2, 0, None)
+
+        # Threshold: Otsu on variance map for adaptive split
+        var_u8 = np.clip(local_var / max(local_var.max(), 1) * 255, 0, 255).astype(np.uint8)
+        _, var_mask = cv2.threshold(var_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Close gaps in UI panels (text creates small high-var spots)
+        var_mask = cv2.morphologyEx(var_mask, cv2.MORPH_CLOSE, np.ones((20, 20), np.uint8))
+
+        # Masked gray: only low-variance (UI) regions
+        ui_gray = gray.copy()
+        ui_gray[var_mask == 0] = 0
+
+        # TopHat on UI-only gray to find content within panels
+        return self._detect_panels_tophat(ui_gray, w, h, min_area)
 
     def _detect_panels_tophat(
         self, gray: np.ndarray, w: int, h: int, min_area: float
@@ -334,13 +445,19 @@ class EnsembleStage(DetectionStage):
             self._panel_metrics[f"{x1},{y1},{x2},{y2}"] = metrics
 
         # --- Decision tree ---
+        # Order matters: scene first (high sat + diverse = game/photo),
+        # then text (only for low-sat, non-scene areas like terminals).
         def _decide():
-            if metrics["is_text_content"]:
-                return "text"
+            # Game scene: high saturation + many colors → skip
             if sat_mean > 40 and sat_std > 30 and active_colors >= 5:
                 return "scene"
-            if 2 <= active_colors <= 5 and sat_mean < 60:
+            # Text area: many regular lines in low-sat context (terminal/editor)
+            if metrics["is_text_content"] and sat_mean < 40:
+                return "text"
+            # Color-distinct UI: moderate palette
+            if 2 <= active_colors <= 5:
                 return "color-ui"
+            # Low-contrast UI: very few colors, dark background
             if active_colors <= 2 and bg < 80:
                 return "low-contrast-ui"
             return "color-ui"
