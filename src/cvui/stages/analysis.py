@@ -276,21 +276,63 @@ class ListQuantizeStage(DetectionStage):
         return ctx
 
     def _find_highlight(self, zone_img) -> tuple[int,int,int,int] | None:
-        """Find highlighted/selected item via HSV saturation."""
+        """Find highlighted/selected item.
+
+        Two strategies:
+        1. HSV high saturation — colored highlights (WeChat green, blue focus)
+        2. Brightness anomaly — bright bar on dark background (game UI selected item)
+        """
         import cv2
+
+        zw = zone_img.shape[1]
+        zh = zone_img.shape[0]
+
+        # Strategy 1: HSV high saturation
         hsv = cv2.cvtColor(zone_img, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (0, 50, 50), (180, 255, 255))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         best = None
         best_area = 0
-        zw = zone_img.shape[1]
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             area = w * h
-            if w > zw * 0.5 and h > 30 and area > best_area:
+            if w > zw * 0.3 and h > 20 and area > best_area:
                 best = (x, y, x + w, y + h)
                 best_area = area
-        return best
+        if best is not None:
+            return best
+
+        # Strategy 2: Brightness anomaly — find the row strip that's
+        # significantly brighter than its neighbors (selected item bar)
+        gray = cv2.cvtColor(zone_img, cv2.COLOR_BGR2GRAY)
+        row_brightness = np.mean(gray, axis=1)
+        median_brightness = float(np.median(row_brightness))
+
+        # Find bright strips (2x median brightness)
+        threshold = max(median_brightness * 1.8, median_brightness + 30)
+        bright_rows = row_brightness > threshold
+
+        # Find connected bright row ranges
+        in_strip = False
+        strips = []
+        start = 0
+        for i in range(zh):
+            if bright_rows[i] and not in_strip:
+                start = i
+                in_strip = True
+            elif not bright_rows[i] and in_strip:
+                if i - start > 15:  # min strip height
+                    strips.append((start, i))
+                in_strip = False
+        if in_strip and zh - start > 15:
+            strips.append((start, zh))
+
+        if strips:
+            # Pick the tallest strip as the selected item
+            tallest = max(strips, key=lambda s: s[1] - s[0])
+            return (0, tallest[0], zw, tallest[1])
+
+        return None
 
     def _estimate_from_rects(self, rects, zone_rect) -> tuple[int,int,int,int] | None:
         """Estimate item height from spacing of existing rects in zone."""
