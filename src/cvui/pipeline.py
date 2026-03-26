@@ -394,12 +394,17 @@ class DetectionPipeline:
                 (int(r[0] * s), int(r[1] * s), int(r[2] * s), int(r[3] * s))
                 for r in ctx.rects
             ]
-            # Also map ui_states
+            # Also map ui_states that are rect-lists
             for key in ctx.ui_states:
-                ctx.ui_states[key] = [
-                    (int(r[0] * s), int(r[1] * s), int(r[2] * s), int(r[3] * s))
-                    for r in ctx.ui_states[key]
-                ]
+                val = ctx.ui_states[key]
+                if (isinstance(val, list) and val
+                        and isinstance(val[0], (tuple, list))
+                        and len(val[0]) == 4
+                        and all(isinstance(x, (int, float)) for x in val[0])):
+                    ctx.ui_states[key] = [
+                        (int(r[0] * s), int(r[1] * s), int(r[2] * s), int(r[3] * s))
+                        for r in val
+                    ]
             ctx.scale = 1.0
 
         return ctx

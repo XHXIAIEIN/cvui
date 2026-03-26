@@ -52,7 +52,10 @@ Pass 4: 合并 + 分级
 
 ### 待做
 
-- [ ] 把 ensemble 固化为 `EnsemblePipeline` 或一组 Stage
-- [ ] 写测试锁住效果：微信 ≥50 元素，ScreenToGif ≥40 元素，Disco Elysium 面板=3 列表=6
-- [ ] ListQuantize zone_rect 自动推断
+- [x] 把 ensemble 固化为 `EnsembleStage`（`stages/ensemble.py`）+ `ensemble_pipeline()` 预设
+- [x] ListQuantize zone_rect 自动推断（`_infer_list_zones` + `_find_regular_group`）
+- [x] 写测试锁住效果（15 tests：合成面板图/列表图/混合图 + zone 推断单测）
+- [x] 修复 pipeline.py ui_states 缩放 bug（非 rect-list 值会崩溃）
+- [x] 修复细检测中值偏差（改用边缘像素判断 TopHat/BlackHat）
+- [ ] 写测试锁住真实截图效果：微信 ≥50 元素，ScreenToGif ≥40 元素，Disco Elysium 面板=3 列表=6
 - [ ] Phase 3 多帧累积验证

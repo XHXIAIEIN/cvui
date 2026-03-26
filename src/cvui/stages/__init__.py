@@ -8,6 +8,7 @@ from .advanced import (
     MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
     SaturationFilterStage, ZoneDetectorStage,
 )
+from .ensemble import EnsembleStage
 from cvui.pipeline import DetectionPipeline, DetectionStage
 
 
@@ -60,6 +61,22 @@ def grounding_pipeline(query: str, box_threshold: float = 0.3) -> DetectionPipel
     return DetectionPipeline([GroundingDINOStage(query=query, box_threshold=box_threshold)])
 
 
+def ensemble_pipeline(scale: float = 1.0, **kwargs) -> DetectionPipeline:
+    """Multi-pass ensemble: saturation filter → panels → details → lists → merge.
+
+    Best for complex UIs with mixed panels, detail elements, and list views.
+    ~31ms at full resolution. Produces tiered classifications:
+    panel, list-item, primary, secondary, auxiliary.
+
+    kwargs are forwarded to EnsembleStage (coarse_kernel, panel_area_pct, etc).
+    """
+    stages: list[DetectionStage] = []
+    if scale < 1.0:
+        stages.append(DownscaleStage(scale=scale))
+    stages.append(EnsembleStage(**kwargs))
+    return DetectionPipeline(stages)
+
+
 def game_pipeline() -> DetectionPipeline:
     """For games: saturation filter → large dilate → strict filter.
 
@@ -89,6 +106,7 @@ __all__ = [
     "MultiFrameAccumulatorStage", "ColorQuantizeStage",
     "MultiColorSpaceStage", "GradientDetectorStage", "TrackingStage",
     "SaturationFilterStage", "ZoneDetectorStage",
+    "EnsembleStage",
     "fast_pipeline", "standard_pipeline", "full_pipeline", "grounding_pipeline",
-    "game_pipeline",
+    "ensemble_pipeline", "game_pipeline",
 ]

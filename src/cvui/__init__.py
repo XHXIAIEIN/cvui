@@ -1,14 +1,16 @@
 """cvui — Pure CV UI element detection library.
 
-Pluggable detection pipeline with 19 stages:
+Pluggable detection pipeline with 20+ stages:
 - GrayscaleStage, TopHatStage, OtsuStage, DilateStage
 - ConnectedComponentStage, RectFilterStage, MergeStage
 - NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage
-- ListQuantizeStage, OmniParserStage, GroundingDINOStage
+- ListQuantizeStage, EnsembleStage
+- OmniParserStage, GroundingDINOStage
 - MultiFrameAccumulatorStage, ColorQuantizeStage, MultiColorSpaceStage
 - GradientDetectorStage, TrackingStage
 
-Preset pipelines: fast_pipeline, standard_pipeline, full_pipeline, game_pipeline
+Preset pipelines: fast_pipeline, standard_pipeline, full_pipeline,
+                   ensemble_pipeline, game_pipeline
 """
 
 __version__ = "0.1.0"
@@ -30,7 +32,8 @@ from .stages.advanced import (
     MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
     SaturationFilterStage, ZoneDetectorStage,
 )
-from .stages import game_pipeline
+from .stages.ensemble import EnsembleStage
+from .stages import ensemble_pipeline, game_pipeline
 from .visualize import (
     render_skeleton, render_annotated, render_grayscale, detect_elements,
 )
