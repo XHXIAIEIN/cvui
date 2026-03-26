@@ -803,3 +803,69 @@ class TestSaturationFilterStage:
 
     def test_is_stage(self):
         assert issubclass(SaturationFilterStage, DetectionStage)
+
+    def test_writes_ui_mask_layer(self):
+        """SaturationFilterStage should store ui_mask in ctx.layers."""
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        img[:] = (128, 128, 128)
+        ctx = DetectionContext(img=img)
+        ctx = SaturationFilterStage().process(ctx)
+        assert "ui_mask" in ctx.layers
+        assert ctx.layers["ui_mask"].shape == (100, 200)
+
+
+# ---------------------------------------------------------------------------
+# ZoneDetectorStage tests
+# ---------------------------------------------------------------------------
+
+from cvui.stages.advanced import ZoneDetectorStage
+
+
+class TestZoneDetectorStage:
+    def test_finds_zones_from_ui_mask(self):
+        """UI mask with two bright clusters -> 2 zones."""
+        mask = np.zeros((600, 800), dtype=np.uint8)
+        mask[50:200, 50:300] = 255   # left panel
+        mask[50:200, 400:750] = 255  # right panel
+        ctx = DetectionContext(img=np.zeros((600, 800, 3), dtype=np.uint8))
+        ctx.layers["ui_mask"] = mask
+        ctx = ZoneDetectorStage().process(ctx)
+        assert len(ctx.zones) == 2
+
+    def test_no_mask_passthrough(self):
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = ZoneDetectorStage().process(ctx)
+        assert ctx.zones == []
+
+    def test_is_stage(self):
+        assert issubclass(ZoneDetectorStage, DetectionStage)
+
+
+# ---------------------------------------------------------------------------
+# Zone-aware ConnectedComponentStage tests
+# ---------------------------------------------------------------------------
+
+
+class TestZoneAwareConnectedComponent:
+    def test_only_detects_in_zones(self):
+        """Elements outside zones should be ignored."""
+        binary = np.zeros((400, 600), dtype=np.uint8)
+        binary[50:80, 50:150] = 255   # inside zone
+        binary[300:330, 400:500] = 255  # outside zone
+        ctx = DetectionContext(img=np.zeros((400, 600, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx.zones = [(0, 0, 300, 200)]  # only left-top zone
+        ctx = ConnectedComponentStage().process(ctx)
+        # Should only find the element inside the zone
+        assert len(ctx.rects) == 1
+        assert ctx.rects[0][0] >= 0 and ctx.rects[0][2] <= 300
+
+    def test_full_image_when_no_zones(self):
+        """Without zones, detect in full image (backward compat)."""
+        binary = np.zeros((400, 600), dtype=np.uint8)
+        binary[50:80, 50:150] = 255
+        binary[300:330, 400:500] = 255
+        ctx = DetectionContext(img=np.zeros((400, 600, 3), dtype=np.uint8))
+        ctx.binary = binary
+        ctx = ConnectedComponentStage().process(ctx)
+        assert len(ctx.rects) == 2

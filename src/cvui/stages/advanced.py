@@ -243,16 +243,72 @@ class SaturationFilterStage(DetectionStage):
         # Close gaps in UI panels
         ui_mask = cv2.morphologyEx(ui_mask, cv2.MORPH_CLOSE, np.ones((10, 10), np.uint8))
 
-        # Apply: if gray exists, zero out scene pixels
-        if ctx.gray is not None:
-            ctx.gray[ui_mask == 0] = 0
-        else:
+        # Store as layer
+        ctx.layers["ui_mask"] = ui_mask
+
+        # Create filtered gray: scene pixels zeroed
+        gray = ctx.gray
+        if gray is None:
             gray = cv2.cvtColor(ctx.img, cv2.COLOR_BGR2GRAY)
-            gray[ui_mask == 0] = 0
-            ctx.gray = gray
+        filtered = gray.copy()
+        filtered[ui_mask == 0] = 0
+        ctx.gray = filtered
 
         # Store mask info
         total = ui_mask.size
         ui_pct = np.count_nonzero(ui_mask) * 100 / max(total, 1)
         ctx.ui_states["saturation_filter"] = f"{ui_pct:.0f}% UI, {100-ui_pct:.0f}% scene"
+        return ctx
+
+
+class ZoneDetectorStage(DetectionStage):
+    """Detect UI panel zones from content distribution in ui_mask.
+
+    Uses content heat map: gaussian blur on foreground pixels,
+    threshold to find dense clusters = UI panels.
+    Writes results to ctx.zones.
+    """
+
+    def __init__(self, blur_size: int = 81, threshold: int = 25,
+                 min_width: int = 100, min_height: int = 50):
+        self.blur_size = blur_size
+        self.threshold = threshold
+        self.min_width = min_width
+        self.min_height = min_height
+
+    def process(self, ctx):
+        import cv2
+
+        # Use ui_mask if available, otherwise use gray/foreground
+        source = ctx.layers.get("ui_mask")
+        if source is None:
+            source = ctx.layers.get("foreground")
+        if source is None:
+            source = ctx.gray
+        if source is None:
+            return ctx
+
+        # Create heat map from content distribution
+        heat = cv2.GaussianBlur(source.astype(np.float32),
+                                (self.blur_size, self.blur_size), 0)
+        if heat.max() > 0:
+            heat_norm = (heat / heat.max() * 255).astype(np.uint8)
+        else:
+            return ctx
+
+        # Threshold to find panels
+        _, panel_mask = cv2.threshold(heat_norm, self.threshold, 255, cv2.THRESH_BINARY)
+        panel_mask = cv2.morphologyEx(panel_mask, cv2.MORPH_CLOSE,
+                                       np.ones((30, 30), np.uint8))
+
+        # Find contours = zones
+        contours, _ = cv2.findContours(panel_mask, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            if w >= self.min_width and h >= self.min_height:
+                ctx.zones.append((x, y, x + w, y + h))
+
+        ctx.zones.sort(key=lambda z: (z[1], z[0]))
+        ctx.layers["zones_mask"] = panel_mask
         return ctx

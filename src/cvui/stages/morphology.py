@@ -67,16 +67,33 @@ class ConnectedComponentStage(DetectionStage):
         import cv2
         if ctx.binary is None:
             return ctx
-        contours, _ = cv2.findContours(
-            ctx.binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         h, w = ctx.height, ctx.width
-        for cnt in contours:
-            x, y, rw, rh = cv2.boundingRect(cnt)
-            if rw < self.min_w or rh < self.min_h:
-                continue
-            if rw > w * 0.95 and rh > h * 0.95:
-                continue
-            ctx.rects.append((x, y, x + rw, y + rh))
+
+        if ctx.zones:
+            # Only detect within zones
+            for zone in ctx.zones:
+                zx1, zy1, zx2, zy2 = zone
+                zone_binary = ctx.binary[zy1:zy2, zx1:zx2]
+                contours, _ = cv2.findContours(
+                    zone_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    x, y, rw, rh = cv2.boundingRect(cnt)
+                    if rw < self.min_w or rh < self.min_h:
+                        continue
+                    ctx.rects.append((zx1 + x, zy1 + y, zx1 + x + rw, zy1 + y + rh))
+        else:
+            # Full image detection (original behavior)
+            contours, _ = cv2.findContours(
+                ctx.binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                x, y, rw, rh = cv2.boundingRect(cnt)
+                if rw < self.min_w or rh < self.min_h:
+                    continue
+                if rw > w * 0.95 and rh > h * 0.95:
+                    continue
+                ctx.rects.append((x, y, x + rw, y + rh))
+
         ctx.quality_score = self._compute_quality(ctx)
         return ctx
 

@@ -20,17 +20,50 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class DetectionContext:
-    """Shared state flowing through detection stages."""
-    img: np.ndarray
-    gray: np.ndarray | None = None
-    binary: np.ndarray | None = None
-    rects: list[tuple[int, int, int, int]] = field(default_factory=list)
+    """Shared state flowing through detection stages.
+
+    Each stage reads previous layers and adds its own. The `layers` dict
+    holds named mask/image overlays that accumulate through the pipeline.
+
+    Key layers (by convention):
+      "ui_mask"    — which pixels are UI vs scene (from SaturationFilter)
+      "zones"      — list of (x1,y1,x2,y2) panel boundaries
+      "foreground" — extracted UI content (from TopHat)
+      "binary"     — thresholded content (from Otsu)
+    """
+    img: np.ndarray                                          # original, never modified
+    layers: dict[str, np.ndarray] = field(default_factory=dict)  # named overlays
+    zones: list[tuple[int, int, int, int]] = field(default_factory=list)  # panel rects
+    rects: list[tuple[int, int, int, int]] = field(default_factory=list)  # element rects
     classifications: dict[int, str] = field(default_factory=dict)
     nested: dict[int, list[int]] = field(default_factory=dict)
-    ui_states: dict[str, list[tuple[int, int, int, int]]] = field(default_factory=dict)
+    ui_states: dict = field(default_factory=dict)
     quality_score: float = 0.0
     stage_log: list[str] = field(default_factory=list)
-    scale: float = 1.0  # downscale factor, rects are in scaled coords until pipeline end
+    scale: float = 1.0
+
+    # Backward compat: gray/binary as layer accessors
+    @property
+    def gray(self) -> np.ndarray | None:
+        return self.layers.get("gray")
+
+    @gray.setter
+    def gray(self, value):
+        if value is not None:
+            self.layers["gray"] = value
+        elif "gray" in self.layers:
+            del self.layers["gray"]
+
+    @property
+    def binary(self) -> np.ndarray | None:
+        return self.layers.get("binary")
+
+    @binary.setter
+    def binary(self, value):
+        if value is not None:
+            self.layers["binary"] = value
+        elif "binary" in self.layers:
+            del self.layers["binary"]
 
     @property
     def height(self) -> int:
