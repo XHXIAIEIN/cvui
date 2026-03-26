@@ -111,7 +111,7 @@ EDGE_MARGIN = 5                  # pixels from window edge = truncated
 
 def render_annotated(
     screenshot: Image.Image | bytes,
-    element_rects: list[tuple[int, int, int, int]] | None = None,
+    rects: list[tuple[int, int, int, int]] | None = None,
     ctx: object = None,
     mode: str = "standard",
 ) -> Image.Image:
@@ -119,8 +119,8 @@ def render_annotated(
 
     Args:
         screenshot: PIL Image or PNG bytes
-        element_rects: pre-computed bounding boxes (simple mode)
-        ctx: DetectionContext with classifications (rich mode, overrides element_rects)
+        rects: pre-computed bounding boxes (simple mode)
+        ctx: DetectionContext with classifications (rich mode, overrides rects)
         mode: detection pipeline mode if auto-detecting
 
     Colors:
@@ -144,8 +144,8 @@ def render_annotated(
     if ctx is not None:
         rects = ctx.rects
         classifications = getattr(ctx, "classifications", {})
-    elif element_rects is not None:
-        rects = element_rects
+    elif rects is not None:
+        rects = rects
         classifications = {}
     else:
         rects = detect_elements(png_bytes, mode=mode)

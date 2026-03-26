@@ -88,7 +88,7 @@ class TestRenderAnnotated:
 
     def test_with_precomputed_rects(self):
         rects = [(10, 10, 100, 50), (200, 200, 300, 250)]
-        result = render_annotated(_make_image(), element_rects=rects)
+        result = render_annotated(_make_image(), rects=rects)
         assert result.size == (800, 600)
 
     def test_auto_detects_when_no_rects(self):
