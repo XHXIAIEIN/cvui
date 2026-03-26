@@ -57,5 +57,6 @@ Pass 4: 合并 + 分级
 - [x] 写测试锁住效果（15 tests：合成面板图/列表图/混合图 + zone 推断单测）
 - [x] 修复 pipeline.py ui_states 缩放 bug（非 rect-list 值会崩溃）
 - [x] 修复细检测中值偏差（改用边缘像素判断 TopHat/BlackHat）
-- [ ] 写测试锁住真实截图效果：微信 ≥50 元素，ScreenToGif ≥40 元素，Disco Elysium 面板=3 列表=6
+- [ ] 写测试锁住真实截图效果：微信 ≥50 元素，ScreenToGif ≥40 元素
 - [ ] Phase 3 多帧累积验证
+- [ ] Disco Elysium 设置页面：game_pipeline 找到 21 元素但设置面板内部细节（滑块/选项文字）丢失。ensemble 在游戏截图上失败（颜色量化+TopHat 都无法正确分区）。需要 game+ensemble 混合方案：game_pipeline 定位面板，ensemble 的逐行检测处理面板内部
