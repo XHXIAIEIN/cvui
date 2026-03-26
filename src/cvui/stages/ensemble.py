@@ -134,10 +134,13 @@ class EnsembleStage(DetectionStage):
 
         n_colors = 8
 
-        # --- Quantize ---
-        pil = PILImage.fromarray(img[:, :, ::-1])
-        quantized = pil.quantize(colors=n_colors, method=PILImage.Quantize.FASTOCTREE)
-        q_indices = np.array(quantized)  # H×W index map (0..n_colors-1)
+        # --- Quantize (with fallback on error) ---
+        try:
+            pil = PILImage.fromarray(img[:, :, ::-1])
+            quantized = pil.quantize(colors=n_colors, method=PILImage.Quantize.FASTOCTREE)
+            q_indices = np.array(quantized)  # H×W index map (0..n_colors-1)
+        except Exception:
+            return []  # quantize failed, let TopHat fallback handle it
 
         palette_data = quantized.getpalette()
         palette = []
@@ -291,11 +294,13 @@ class EnsembleStage(DetectionStage):
         import cv2
 
         x1, y1, x2, y2 = panel
+        rw, rh = x2 - x1, y2 - y1
+        if rw < 10 or rh < 10:
+            return False, []
         sub = gray[y1:y2, x1:x2]
         if sub.size == 0:
             return False, []
 
-        rw, rh = x2 - x1, y2 - y1
         short_side = min(rw, rh)
         k_min, k_max = self.fine_kernel_range
         k = max(k_min, min(k_max, short_side // 4))
@@ -327,7 +332,9 @@ class EnsembleStage(DetectionStage):
         line_pitch = metrics["line_pitch"]
 
         # --- Step 4+5: Slice into rows, detect per-row ---
-        if line_pitch > 0 and line_h > 0:
+        # Guard: line_pitch must be meaningful (>= 5px) to avoid
+        # degenerate loops with thousands of 1px strips.
+        if line_pitch >= 5 and line_h >= 3:
             details = self._detect_per_row(
                 binary, x1, y1, rw, rh, line_h, line_pitch, char_w
             )
@@ -449,12 +456,17 @@ class EnsembleStage(DetectionStage):
         """
         import cv2
 
+        if binary.size == 0:
+            return {
+                "line_height": 0, "char_width": 0, "line_pitch": 0,
+                "line_gap": 0, "n_lines": 0, "is_text_content": False,
+            }
         h, w = binary.shape[:2]
         result = {
             "line_height": 0, "char_width": 0, "line_pitch": 0,
             "line_gap": 0, "n_lines": 0, "is_text_content": False,
         }
-        if h < 30:
+        if h < 30 or w < 10:
             return result
 
         # --- Quick check: high coverage = dense text ---
@@ -685,14 +697,18 @@ class EnsembleStage(DetectionStage):
             list_set.add(item)
 
         # Add details not inside any list item
+        # Tier thresholds scale with image area (resolution-independent)
+        total_area = max(w * h, 1)
+        primary_threshold = total_area * 0.005    # ~0.5% of image
+        secondary_threshold = total_area * 0.0005  # ~0.05% of image
         for detail in details:
             if any(_inside(detail, li) for li in list_set):
                 continue
             all_rects.append(detail)
             area = (detail[2] - detail[0]) * (detail[3] - detail[1])
-            if area > 30000:
+            if area > primary_threshold:
                 tier = "primary"
-            elif area > 3000:
+            elif area > secondary_threshold:
                 tier = "secondary"
             else:
                 tier = "auxiliary"

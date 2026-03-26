@@ -292,6 +292,52 @@ class TestEnsemblePipeline:
 # Zone inference unit tests
 # ---------------------------------------------------------------------------
 
+class TestEdgeCases:
+    """Edge cases that should not crash."""
+
+    def test_tiny_image(self):
+        img = np.zeros((5, 5, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        assert ctx.rects == []
+
+    def test_single_color_image(self):
+        img = np.full((200, 300, 3), 128, dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        # Should not crash, may find 0 rects
+        assert isinstance(ctx.rects, list)
+
+    def test_white_image(self):
+        img = np.full((400, 600, 3), 255, dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        assert isinstance(ctx.rects, list)
+
+    def test_black_image(self):
+        img = np.zeros((400, 600, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        assert isinstance(ctx.rects, list)
+
+    def test_narrow_image(self):
+        img = np.zeros((600, 20, 3), dtype=np.uint8)
+        img[:, 5:15] = 200
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        assert isinstance(ctx.rects, list)
+
+    def test_very_large_synthetic(self):
+        """4K-ish resolution should not timeout or OOM."""
+        img = np.zeros((2160, 3840, 3), dtype=np.uint8)
+        # Add some content
+        cv2.rectangle(img, (100, 100), (1800, 1000), (60, 60, 60), -1)
+        cv2.rectangle(img, (120, 120), (1780, 180), (200, 200, 200), -1)
+        ctx = DetectionContext(img=img)
+        ctx = EnsembleStage().process(ctx)
+        assert isinstance(ctx.rects, list)
+
+
 class TestZoneInference:
     def test_regular_group_detection(self):
         """_find_regular_group should detect vertically aligned elements."""
