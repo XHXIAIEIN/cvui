@@ -51,23 +51,18 @@ class EnsembleStage(DetectionStage):
         total_area = h * w
         min_panel_area = total_area * self.panel_area_pct / 100.0
 
-        # ------------------------------------------------------------------
-        # Pass 0+1: Panel detection
-        #
-        # Two strategies, pick the one that gives better results:
-        # A) Color quantize → segment by background color (best for UIs
-        #    with distinct panel colors: light theme, mixed light/dark)
-        # B) TopHat content → dilate → merge (fallback for dark-theme UIs
-        #    where panels share similar background colors)
-        # ------------------------------------------------------------------
+        # Precompute shared layers (used by multiple strategies)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        ctx.layers["gray"] = gray
 
+        # ==================================================================
+        # Phase 1: Detect panels (coarse regions)
+        # ==================================================================
         color_panels = self._detect_panels_by_color(img, w, h, min_panel_area)
         if len(color_panels) >= 2:
             panels = color_panels
         else:
-            # Fallback: content-based TopHat detection
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             s = hsv[:, :, 1]
             _, ui_mask = cv2.threshold(
                 s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
@@ -81,22 +76,27 @@ class EnsembleStage(DetectionStage):
 
         panels = self._merge_nearby_panels(panels, h)
         ctx.zones = list(panels)
-        ctx.layers["gray"] = gray
 
-        # ------------------------------------------------------------------
-        # Pass 2: Fine detection — color blocks within each panel
-        # Uses full-color image (not gray) for color quantization.
-        # ------------------------------------------------------------------
+        # ==================================================================
+        # Phase 2: Per-panel — probe → classify → dispatch strategy
+        # ==================================================================
         details = []
         text_panels = []
         self._panel_metrics = {}
-        for i, panel in enumerate(panels):
-            is_text, panel_details = self._detect_details_in_panel(
-                img, panel
-            )
-            if is_text:
+        for panel in panels:
+            region_type = self._classify_region(img, gray, hsv, panel)
+
+            if region_type == "text":
                 text_panels.append(panel)
-            details.extend(panel_details)
+            elif region_type == "scene":
+                pass  # pure game scene, no UI — skip
+            elif region_type == "color-ui":
+                details.extend(self._strategy_color_blocks(img, panel))
+            elif region_type == "low-contrast-ui":
+                details.extend(self._strategy_tophat(gray, hsv, panel))
+            else:
+                # fallback: try color blocks
+                details.extend(self._strategy_color_blocks(img, panel))
 
         # ------------------------------------------------------------------
         # Pass 3: Auto-infer list zones + ListQuantize
@@ -272,8 +272,194 @@ class EnsembleStage(DetectionStage):
         return result
 
     # ======================================================================
-    # Pass 2: Fine detection inside panels
+    # Phase 2: Region classification + strategy dispatch
     # ======================================================================
+
+    def _classify_region(
+        self, img: np.ndarray, gray: np.ndarray, hsv: np.ndarray,
+        panel: tuple[int, int, int, int],
+    ) -> str:
+        """Probe a panel region and classify it for strategy selection.
+
+        Computes quick features:
+        - Saturation stats: high mean + high std → game scene
+        - Color diversity: many distinct colors → scene; few → UI
+        - Binary coverage from TopHat: high + many CCs → text area
+        - Brightness uniformity: very uniform → solid panel / empty area
+
+        Returns one of: "text", "scene", "color-ui", "low-contrast-ui"
+        """
+        import cv2
+
+        x1, y1, x2, y2 = panel
+        rw, rh = x2 - x1, y2 - y1
+        if rw < 10 or rh < 10:
+            return "scene"
+
+        sub_gray = gray[y1:y2, x1:x2]
+        sub_hsv = hsv[y1:y2, x1:x2]
+        sub_s = sub_hsv[:, :, 1].astype(np.float32)
+
+        # --- Feature 1: Saturation ---
+        sat_mean = float(np.mean(sub_s))
+        sat_std = float(np.std(sub_s))
+
+        # --- Feature 2: Color diversity (quick quantize) ---
+        from PIL import Image as PILImage
+        try:
+            sub_color = img[y1:y2, x1:x2]
+            pil = PILImage.fromarray(sub_color[:, :, ::-1])
+            q = pil.quantize(colors=6, method=PILImage.Quantize.FASTOCTREE)
+            q_idx = np.array(q)
+            color_counts = np.bincount(q_idx.ravel(), minlength=6)
+            active_colors = int(np.sum(color_counts > q_idx.size * 0.02))
+        except Exception:
+            active_colors = 1
+
+        # --- Feature 3: Text metrics (reuse existing method) ---
+        k = max(15, min(40, min(rw, rh) // 4))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        border_px = np.concatenate([
+            sub_gray[0, :], sub_gray[-1, :], sub_gray[:, 0], sub_gray[:, -1]
+        ])
+        bg = float(np.median(border_px))
+        if bg >= 128:
+            fg = cv2.morphologyEx(sub_gray, cv2.MORPH_BLACKHAT, kernel)
+        else:
+            fg = cv2.morphologyEx(sub_gray, cv2.MORPH_TOPHAT, kernel)
+        _, binary = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        metrics = self._estimate_text_metrics(binary)
+        if hasattr(self, "_panel_metrics"):
+            self._panel_metrics[f"{x1},{y1},{x2},{y2}"] = metrics
+
+        # --- Decision tree ---
+        def _decide():
+            if metrics["is_text_content"]:
+                return "text"
+            if sat_mean > 40 and sat_std > 30 and active_colors >= 5:
+                return "scene"
+            if 2 <= active_colors <= 5 and sat_mean < 60:
+                return "color-ui"
+            if active_colors <= 2 and bg < 80:
+                return "low-contrast-ui"
+            return "color-ui"
+
+        result = _decide()
+        # Store classification in metrics for debugging
+        metrics["region_type"] = result
+        metrics["_sat_mean"] = round(sat_mean, 1)
+        metrics["_sat_std"] = round(sat_std, 1)
+        metrics["_active_colors"] = active_colors
+        metrics["_bg"] = round(bg, 1)
+        return result
+
+    def _strategy_color_blocks(
+        self, img: np.ndarray, panel: tuple[int, int, int, int],
+    ) -> list[tuple[int, int, int, int]]:
+        """Detect UI elements as non-background color blocks."""
+        import cv2
+        from PIL import Image as PILImage
+
+        x1, y1, x2, y2 = panel
+        rw, rh = x2 - x1, y2 - y1
+        sub_color = img[y1:y2, x1:x2]
+
+        try:
+            pil_sub = PILImage.fromarray(sub_color[:, :, ::-1])
+            quantized = pil_sub.quantize(colors=6, method=PILImage.Quantize.FASTOCTREE)
+            q_idx = np.array(quantized)
+        except Exception:
+            return []
+
+        # Background = most common color at borders
+        border_idx = np.concatenate([
+            q_idx[0, :], q_idx[-1, :], q_idx[:, 0], q_idx[:, -1]
+        ])
+        bg_color_idx = int(np.bincount(border_idx).argmax())
+
+        total_area = rw * rh
+        min_block = max(total_area * 0.001, 100)
+        max_block = total_area * 0.85
+
+        details = []
+        for color_idx in range(6):
+            if color_idx == bg_color_idx:
+                continue
+            mask = (q_idx == color_idx).astype(np.uint8) * 255
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for cnt in contours:
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                area = cw * ch
+                if area < min_block or area > max_block:
+                    continue
+                if cw < 8 or ch < 8:
+                    continue
+                details.append((x1 + cx, y1 + cy, x1 + cx + cw, y1 + cy + ch))
+
+        return details
+
+    def _strategy_tophat(
+        self, gray: np.ndarray, hsv: np.ndarray,
+        panel: tuple[int, int, int, int],
+    ) -> list[tuple[int, int, int, int]]:
+        """Detect UI elements via saturation filter + TopHat on low-contrast panels."""
+        import cv2
+
+        x1, y1, x2, y2 = panel
+        rw, rh = x2 - x1, y2 - y1
+        sub_gray = gray[y1:y2, x1:x2]
+        sub_s = hsv[y1:y2, x1:x2, 1]
+
+        # Saturation filter: keep low-sat UI, mask high-sat scene
+        _, ui_mask = cv2.threshold(sub_s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ui_mask = cv2.morphologyEx(ui_mask, cv2.MORPH_CLOSE, np.ones((8, 8), np.uint8))
+        filtered = sub_gray.copy()
+        filtered[ui_mask == 0] = 0
+
+        # TopHat on filtered
+        k = max(15, min(40, min(rw, rh) // 4))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        border_px = np.concatenate([
+            filtered[0, :], filtered[-1, :], filtered[:, 0], filtered[:, -1]
+        ])
+        bg = float(np.median(border_px))
+        if bg >= 128:
+            fg = cv2.morphologyEx(filtered, cv2.MORPH_BLACKHAT, kernel)
+        else:
+            fg = cv2.morphologyEx(filtered, cv2.MORPH_TOPHAT, kernel)
+
+        _, binary = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Dilate to connect nearby elements
+        scale = max(1.0, min(rw, rh) / 400.0)
+        binary = cv2.dilate(binary, np.ones((max(2, int(2*scale)), max(8, int(10*scale))), np.uint8))
+        binary = cv2.dilate(binary, np.ones((max(4, int(5*scale)), max(2, int(2*scale))), np.uint8))
+
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        total_area = rw * rh
+        min_block = max(total_area * 0.001, 80)
+
+        details = []
+        for cnt in contours:
+            cx, cy, cw, ch = cv2.boundingRect(cnt)
+            area = cw * ch
+            if area < min_block:
+                continue
+            if cw < 8 or ch < 8:
+                continue
+            if cw > rw * 0.95 and ch > rh * 0.95:
+                continue
+            details.append((x1 + cx, y1 + cy, x1 + cx + cw, y1 + cy + ch))
+
+        return details
 
     def _detect_details_in_panel(
         self, img: np.ndarray, panel: tuple[int, int, int, int]
