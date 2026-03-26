@@ -71,20 +71,26 @@ class EnsembleStage(DetectionStage):
         ctx.layers["filtered_gray"] = filtered_gray
 
         # ------------------------------------------------------------------
-        # Pass 1: Coarse detection → panels
+        # Pass 1: Coarse detection → panels (use filtered_gray to
+        # separate UI from colorful scene backgrounds)
         # ------------------------------------------------------------------
         panels = self._detect_panels(filtered_gray, w, h, min_panel_area)
         ctx.zones = list(panels)
 
         # ------------------------------------------------------------------
         # Pass 2: Fine detection within each panel
+        # Use ORIGINAL gray, not filtered_gray — inside a panel we want
+        # ALL content including colored text (syntax highlighting, green
+        # terminal output, blue links). The saturation filter already
+        # did its job in Pass 1 by locating the panels.
         # ------------------------------------------------------------------
+        original_gray = gray  # unfiltered
         details = []
         text_panels = []  # panels classified as text-content areas
         self._panel_metrics = {}
         for i, panel in enumerate(panels):
             is_text, panel_details = self._detect_details_in_panel(
-                filtered_gray, panel
+                original_gray, panel
             )
             if is_text:
                 text_panels.append(panel)
