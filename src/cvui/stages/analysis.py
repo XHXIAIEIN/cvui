@@ -304,8 +304,13 @@ class ListQuantizeStage(DetectionStage):
 
         # Strategy 2: Brightness anomaly — find the row strip that's
         # significantly brighter than its neighbors (selected item bar)
+        # Use saturation-filtered gray so scene brightness doesn't interfere
         gray = cv2.cvtColor(zone_img, cv2.COLOR_BGR2GRAY)
-        row_brightness = np.mean(gray, axis=1)
+        hsv_s = cv2.cvtColor(zone_img, cv2.COLOR_BGR2HSV)[:, :, 1]
+        _, ui_mask = cv2.threshold(hsv_s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        gray_filtered = gray.copy()
+        gray_filtered[ui_mask == 0] = 0  # zero out scene
+        row_brightness = np.mean(gray_filtered, axis=1)
         median_brightness = float(np.median(row_brightness))
 
         # Find bright strips (2x median brightness)
@@ -364,10 +369,22 @@ class ListQuantizeStage(DetectionStage):
 
     @staticmethod
     def _get_foreground(zone_img):
-        """Extract foreground using adaptive TopHat/BlackHat."""
+        """Extract foreground with saturation pre-filter.
+
+        First masks out high-saturation scene pixels (game backgrounds),
+        then applies TopHat/BlackHat on the cleaned grayscale.
+        """
         import cv2
         gray = cv2.cvtColor(zone_img, cv2.COLOR_BGR2GRAY)
-        median = float(np.median(gray))
+
+        # Saturation filter: mask out colorful scene regions
+        hsv = cv2.cvtColor(zone_img, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1]
+        _, ui_mask = cv2.threshold(s, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ui_mask = cv2.morphologyEx(ui_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        gray[ui_mask == 0] = 0  # zero out scene
+
+        median = float(np.median(gray[gray > 0])) if np.any(gray > 0) else 128
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
         if median >= 128:
             return cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
