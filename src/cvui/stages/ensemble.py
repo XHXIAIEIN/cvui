@@ -84,14 +84,15 @@ class EnsembleStage(DetectionStage):
         ctx.layers["gray"] = gray
 
         # ------------------------------------------------------------------
-        # Pass 2: Fine detection within each panel (original gray)
+        # Pass 2: Fine detection — color blocks within each panel
+        # Uses full-color image (not gray) for color quantization.
         # ------------------------------------------------------------------
         details = []
-        text_panels = []  # panels classified as text-content areas
+        text_panels = []
         self._panel_metrics = {}
         for i, panel in enumerate(panels):
             is_text, panel_details = self._detect_details_in_panel(
-                gray, panel
+                img, panel
             )
             if is_text:
                 text_panels.append(panel)
@@ -275,166 +276,97 @@ class EnsembleStage(DetectionStage):
     # ======================================================================
 
     def _detect_details_in_panel(
-        self, gray: np.ndarray, panel: tuple[int, int, int, int]
+        self, img: np.ndarray, panel: tuple[int, int, int, int]
     ) -> tuple[bool, list[tuple[int, int, int, int]]]:
-        """Per-panel: TopHat → Otsu → estimate metrics → slice into rows → CC.
+        """Per-panel: color quantize → find color blocks that differ from bg.
 
-        Architecture: coarse-to-fine with row slicing.
-        1. TopHat + Otsu on the whole panel → binary
-        2. Estimate text metrics (line_height, line_pitch) from CCs
-        3. If text-content → skip
-        4. Slice binary into horizontal strips at line_pitch intervals
-        5. Per-strip: horizontal-only dilate → CC → collect elements
+        Strategy shift: detect COLOR BLOCKS, not text edges.
+        1. Crop panel from the FULL COLOR image (not gray)
+        2. Identify background color (most common color at border)
+        3. Quantize panel to N colors
+        4. Each non-background color region = a UI element (button, slider,
+           icon, highlighted area)
+        5. Text is intentionally ignored — that's OCR's job
 
-        Row slicing prevents cross-line merging entirely — each strip
-        is one logical "line" of the UI.
+        Also estimates text metrics from the gray channel for text-content
+        gating (many small CCs in regular rows = text area, skip it).
 
         Returns (is_text_content, details).
         """
         import cv2
+        from PIL import Image as PILImage
 
         x1, y1, x2, y2 = panel
         rw, rh = x2 - x1, y2 - y1
         if rw < 10 or rh < 10:
             return False, []
-        sub = gray[y1:y2, x1:x2]
-        if sub.size == 0:
+
+        sub_color = img[y1:y2, x1:x2]
+        if sub_color.size == 0:
             return False, []
 
+        # --- Text-content gate (still uses gray + CC analysis) ---
+        sub_gray = cv2.cvtColor(sub_color, cv2.COLOR_BGR2GRAY)
         short_side = min(rw, rh)
-        k_min, k_max = self.fine_kernel_range
-        k = max(k_min, min(k_max, short_side // 4))
-
+        k = max(15, min(40, short_side // 4))
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        border = np.concatenate([
-            sub[0, :], sub[-1, :], sub[:, 0], sub[:, -1]
+        border_px = np.concatenate([
+            sub_gray[0, :], sub_gray[-1, :], sub_gray[:, 0], sub_gray[:, -1]
         ])
-        bg_brightness = float(np.median(border))
+        bg_brightness = float(np.median(border_px))
         if bg_brightness >= 128:
-            fg = cv2.morphologyEx(sub, cv2.MORPH_BLACKHAT, kernel)
+            fg = cv2.morphologyEx(sub_gray, cv2.MORPH_BLACKHAT, kernel)
         else:
-            fg = cv2.morphologyEx(sub, cv2.MORPH_TOPHAT, kernel)
+            fg = cv2.morphologyEx(sub_gray, cv2.MORPH_TOPHAT, kernel)
+        _, text_binary = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        _, binary = cv2.threshold(fg, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # --- Step 2: Estimate text metrics ---
-        metrics = self._estimate_text_metrics(binary)
+        metrics = self._estimate_text_metrics(text_binary)
         if hasattr(self, "_panel_metrics"):
-            panel_key = f"{x1},{y1},{x2},{y2}"
-            self._panel_metrics[panel_key] = metrics
-
-        # --- Step 3: Text-content gate ---
+            self._panel_metrics[f"{x1},{y1},{x2},{y2}"] = metrics
         if metrics["is_text_content"]:
             return True, []
 
-        line_h = metrics["line_height"]
-        char_w = metrics["char_width"]
-        line_pitch = metrics["line_pitch"]
+        # --- Color block detection ---
+        try:
+            pil_sub = PILImage.fromarray(sub_color[:, :, ::-1])
+            n_colors = 6
+            quantized = pil_sub.quantize(colors=n_colors, method=PILImage.Quantize.FASTOCTREE)
+            q_idx = np.array(quantized)
+        except Exception:
+            return False, []
 
-        # --- Step 4+5: Slice into rows, detect per-row ---
-        # Guard: line_pitch must be meaningful (>= 5px) to avoid
-        # degenerate loops with thousands of 1px strips.
-        if line_pitch >= 5 and line_h >= 3:
-            details = self._detect_per_row(
-                binary, x1, y1, rw, rh, line_h, line_pitch, char_w
-            )
-        else:
-            # No metrics: fall back to whole-panel detection
-            details = self._detect_whole_panel(
-                binary, x1, y1, rw, rh, short_side
-            )
+        # Background color = most common color at the 4 borders
+        border_indices = np.concatenate([
+            q_idx[0, :], q_idx[-1, :], q_idx[:, 0], q_idx[:, -1]
+        ])
+        bg_color_idx = int(np.bincount(border_indices).argmax())
 
-        return False, details
+        # Find non-background color blocks
+        total_area = rw * rh
+        min_block = max(total_area * 0.001, 100)  # 0.1% of panel or 100px²
+        max_block = total_area * 0.85
 
-    @staticmethod
-    def _detect_per_row(
-        binary: np.ndarray,
-        panel_x: int, panel_y: int,
-        rw: int, rh: int,
-        line_h: int, line_pitch: int, char_w: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """Slice panel binary into row strips, detect elements per-row.
-
-        Each strip height = line_pitch (one logical row).
-        Only horizontal dilate within each strip — no vertical merging.
-        """
-        import cv2
-
-        # Horizontal dilate: connect characters into word/phrase blocks.
-        # Use line_height as reference — in most UIs, word spacing ≈ char height.
-        # Cap to 25% of panel width to avoid merging across columns.
-        max_h_dilate = max(8, rw // 4)
-        h_dilate_w = max(8, min(max_h_dilate, int(line_h * 1.5)))
-        h_dilate_h = max(2, min(6, line_h // 6))
-        h_kernel = np.ones((h_dilate_h, h_dilate_w), np.uint8)
-
-        min_elem_h = max(4, line_h // 3)
         details = []
-
-        # Slice into rows
-        y = 0
-        while y < rh:
-            strip_end = min(y + line_pitch, rh)
-            strip = binary[y:strip_end, :]
-            if strip.size == 0:
-                y += line_pitch
+        for color_idx in range(n_colors):
+            if color_idx == bg_color_idx:
                 continue
-
-            # Horizontal-only dilate within this strip
-            dilated = cv2.dilate(strip, h_kernel, iterations=1)
+            mask = (q_idx == color_idx).astype(np.uint8) * 255
+            # Light close to merge adjacent same-color pixels
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
             contours, _ = cv2.findContours(
-                dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             for cnt in contours:
                 cx, cy, cw, ch = cv2.boundingRect(cnt)
-                if cw < 6 or ch < min_elem_h:
+                area = cw * ch
+                if area < min_block or area > max_block:
                     continue
-                # Skip if it spans the entire strip (whole-row blob)
-                if cw > rw * 0.95 and ch > (strip_end - y) * 0.95:
+                if cw < 8 or ch < 8:
                     continue
-                details.append((
-                    panel_x + cx, panel_y + y + cy,
-                    panel_x + cx + cw, panel_y + y + cy + ch,
-                ))
+                details.append((x1 + cx, y1 + cy, x1 + cx + cw, y1 + cy + ch))
 
-            y += line_pitch
-
-        return details
-
-    @staticmethod
-    def _detect_whole_panel(
-        binary: np.ndarray,
-        panel_x: int, panel_y: int,
-        rw: int, rh: int, short_side: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """Fallback: detect on the whole panel when no text metrics available."""
-        import cv2
-
-        scale_factor = max(1.0, short_side / 400.0)
-        h_k = (max(2, int(2 * scale_factor)), max(8, int(8 * scale_factor)))
-        v_k = (max(4, int(4 * scale_factor)), max(2, int(2 * scale_factor)))
-
-        dilated = cv2.dilate(binary, np.ones(h_k, np.uint8), iterations=1)
-        dilated = cv2.dilate(dilated, np.ones(v_k, np.uint8), iterations=1)
-
-        contours, _ = cv2.findContours(
-            dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        details = []
-        for cnt in contours:
-            cx, cy, cw, ch = cv2.boundingRect(cnt)
-            if cw < 10 or ch < 8:
-                continue
-            if cw > rw * 0.95 and ch > rh * 0.95:
-                continue
-            details.append((
-                panel_x + cx, panel_y + cy,
-                panel_x + cx + cw, panel_y + cy + ch,
-            ))
-
-        return details
+        return False, details
 
     @staticmethod
     def _estimate_text_metrics(binary: np.ndarray) -> dict:
