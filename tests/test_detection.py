@@ -588,3 +588,137 @@ class TestToReport:
         # Light image
         light = DetectionContext(img=np.full((100, 100, 3), 200, dtype=np.uint8))
         assert light.to_report()["window"]["theme"] == "light"
+
+
+from cvui.stages.advanced import (
+    MultiFrameAccumulatorStage, ColorQuantizeStage,
+    MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
+)
+
+
+class TestMultiFrameAccumulatorStage:
+    def test_not_enough_frames(self):
+        stage = MultiFrameAccumulatorStage(n_frames=5)
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = stage.process(ctx)
+        assert ctx.binary is None  # not enough frames yet
+
+    def test_static_regions_detected(self):
+        stage = MultiFrameAccumulatorStage(n_frames=3, static_threshold=50)
+        # Add 3 identical frames → everything is static
+        frame = np.full((100, 200, 3), 128, dtype=np.uint8)
+        for _ in range(3):
+            stage.add_frame(frame)
+        ctx = DetectionContext(img=frame)
+        ctx = stage.process(ctx)
+        assert ctx.binary is not None
+        assert np.count_nonzero(ctx.binary) > 0  # static regions found
+
+    def test_dynamic_regions_masked(self):
+        stage = MultiFrameAccumulatorStage(n_frames=3, static_threshold=50)
+        # Add frames with one changing region
+        for i in range(3):
+            frame = np.full((100, 200, 3), 128, dtype=np.uint8)
+            frame[40:60, 40:60] = i * 80  # this region changes
+            stage.add_frame(frame)
+        ctx = DetectionContext(img=frame)
+        ctx = stage.process(ctx)
+        # The changing region should NOT be in static mask
+        assert ctx.binary[50, 50] == 0
+
+
+class TestColorQuantizeStage:
+    def test_reduces_colors(self):
+        img = np.random.randint(0, 256, (100, 200, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = ColorQuantizeStage(n_colors=4).process(ctx)
+        unique_colors = len(np.unique(ctx.img.reshape(-1, 3), axis=0))
+        assert unique_colors <= 8  # some tolerance
+
+    def test_palette_extracted(self):
+        img = np.random.randint(0, 256, (50, 50, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx = ColorQuantizeStage(n_colors=4).process(ctx)
+        assert "palette" in ctx.ui_states
+
+    def test_is_stage(self):
+        assert issubclass(ColorQuantizeStage, DetectionStage)
+
+
+class TestMultiColorSpaceStage:
+    def test_produces_gray(self):
+        ctx = DetectionContext(img=np.full((50, 50, 3), 128, dtype=np.uint8))
+        ctx = MultiColorSpaceStage().process(ctx)
+        assert ctx.gray is not None
+        assert ctx.gray.shape == (50, 50)
+
+    def test_saturation_map(self):
+        ctx = DetectionContext(img=np.full((50, 50, 3), 128, dtype=np.uint8))
+        ctx = MultiColorSpaceStage().process(ctx)
+        assert "saturation_map" in ctx.ui_states
+
+
+class TestGradientDetectorStage:
+    def test_masks_high_variance(self):
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        img[:] = 128
+        # Add noisy region (scene-like)
+        img[20:80, 100:180] = np.random.randint(0, 256, (60, 80, 3), dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx.binary = np.ones((100, 200), dtype=np.uint8) * 255
+        ctx = GradientDetectorStage(scene_threshold=200).process(ctx)
+        # Noisy region should be zeroed out in binary
+        assert ctx.binary[50, 140] == 0
+
+    def test_preserves_uniform(self):
+        img = np.full((100, 200, 3), 128, dtype=np.uint8)
+        ctx = DetectionContext(img=img)
+        ctx.binary = np.ones((100, 200), dtype=np.uint8) * 255
+        ctx = GradientDetectorStage().process(ctx)
+        # Uniform image should keep binary intact
+        assert np.count_nonzero(ctx.binary) > 0
+
+
+class TestTrackingStage:
+    def test_tracks_moved_element(self):
+        # Use a dark background with a textured patch so TM_CCOEFF_NORMED works
+        rng = np.random.default_rng(42)
+        # Textured patch (high variance so correlation is discriminative)
+        patch = rng.integers(100, 256, (30, 50, 3), dtype=np.uint8)
+        prev = np.zeros((200, 300, 3), dtype=np.uint8)
+        curr = np.zeros((200, 300, 3), dtype=np.uint8)
+        prev[50:80, 50:100] = patch
+        # Same patch shifted right by 10px
+        curr[50:80, 60:110] = patch
+
+        stage = TrackingStage(
+            prev_rects=[(50, 50, 100, 80)],
+            prev_img=prev,
+            search_radius=30,
+        )
+        ctx = DetectionContext(img=curr)
+        ctx = stage.process(ctx)
+        assert len(ctx.rects) >= 1
+        # Should find element near x=60
+        found = ctx.rects[0]
+        assert abs(found[0] - 60) < 15
+
+    def test_no_prev_passthrough(self):
+        stage = TrackingStage()
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = stage.process(ctx)
+        assert ctx.rects == []
+
+    def test_should_continue_when_no_tracks(self):
+        stage = TrackingStage()
+        ctx = DetectionContext(img=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx = stage.process(ctx)
+        assert stage.should_continue(ctx) is True
+
+    def test_should_stop_when_tracked(self):
+        prev = np.zeros((100, 100, 3), dtype=np.uint8)
+        prev[30:60, 30:60] = 200
+        stage = TrackingStage(prev_rects=[(30, 30, 60, 60)], prev_img=prev)
+        ctx = DetectionContext(img=prev.copy())
+        ctx = stage.process(ctx)
+        assert stage.should_continue(ctx) is False  # found tracks, skip full detection

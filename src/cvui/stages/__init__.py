@@ -3,6 +3,10 @@ from .preprocessing import DownscaleStage, GrayscaleStage, TopHatStage, OtsuStag
 from .morphology import DilateStage, ConnectedComponentStage, RectFilterStage, MergeStage
 from .analysis import NestedStage, ClassifyStage, ChannelAnalysisStage, DiffStage, ListQuantizeStage
 from .ml import OmniParserStage, GroundingDINOStage
+from .advanced import (
+    MultiFrameAccumulatorStage, ColorQuantizeStage,
+    MultiColorSpaceStage, GradientDetectorStage, TrackingStage,
+)
 from cvui.pipeline import DetectionPipeline, DetectionStage
 
 
@@ -55,11 +59,25 @@ def grounding_pipeline(query: str, box_threshold: float = 0.3) -> DetectionPipel
     return DetectionPipeline([GroundingDINOStage(query=query, box_threshold=box_threshold)])
 
 
+def game_pipeline() -> DetectionPipeline:
+    """For games: quantize → detect → classify. ~30ms."""
+    return DetectionPipeline([
+        ColorQuantizeStage(n_colors=8),
+        GrayscaleStage(), TopHatStage(), OtsuStage(),
+        DilateStage(), ConnectedComponentStage(),
+        RectFilterStage(), MergeStage(),
+        ClassifyStage(),
+    ])
+
+
 __all__ = [
     "DownscaleStage", "GrayscaleStage", "TopHatStage", "OtsuStage",
     "DilateStage", "ConnectedComponentStage", "RectFilterStage", "MergeStage",
     "NestedStage", "ClassifyStage", "ChannelAnalysisStage", "DiffStage", "ListQuantizeStage",
     "OmniParserStage", "GroundingDINOStage",
     "DetectionPipeline", "DetectionStage",
+    "MultiFrameAccumulatorStage", "ColorQuantizeStage",
+    "MultiColorSpaceStage", "GradientDetectorStage", "TrackingStage",
     "fast_pipeline", "standard_pipeline", "full_pipeline", "grounding_pipeline",
+    "game_pipeline",
 ]
