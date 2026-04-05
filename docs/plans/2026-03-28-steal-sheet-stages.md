@@ -20,6 +20,23 @@
 | 4 | V7 | TilingStage | DarkHelp (R7) | stages/advanced.py | Medium |
 | 5 | P11 | AdaptiveDownscaleStage | Carbonyl (R9) | stages/preprocessing.py | Low |
 | 6 | V5 | PreAnnotationExporter | labelU (R7) | new: stages/export.py | Low |
+| 7 | V3 | DetectionFeatureRetrieval | PaddleX PP-ShiTuV2 (R7) | stages/ml.py | High |
+| 8 | V6 | Pix2EmbStage | NExT-Chat (R7) | research/ | High |
+| 9 | V8 | DOTSOCRStage | R7 supplement | stages/ml.py | Medium |
+| 10 | V9 | SyntheticDataGenerator | DocLayout-YOLO (R7) | research/ | High |
+| 11 | V14 | TextFirstLayeredStrategy | Carbonyl (R9) | stages/text.py | Medium |
+
+---
+
+## Shelved / Research Patterns (from Orchestrator PATTERNS.md migration 2026-04-05)
+
+These were moved from Orchestrator's PATTERNS.md to cvui scope:
+
+- **V3 DetectionFeatureRetrieval** — FAISS vector cache for similar windows. Current exact cache sufficient. ⏸️ shelved
+- **V6 Pix2EmbStage** — Position embedding → decoder → bbox/mask. Long-term research. ⏸️ shelved
+- **V8 DOTSOCRStage** — 1.7B VLM, prompt_layout_only outputs bbox + category. Alternative VLMZoneStage backend. 📐 designed
+- **V9 SyntheticDataGenerator** — Bin-packing synthetic UI pages for YOLO training. Long-term research. ⏸️ shelved
+- **V14 TextFirstLayeredStrategy** — DOM text / Win32 control text → trust first; OCR only as fallback. 📐 designed
 
 ---
 
