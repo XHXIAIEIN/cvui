@@ -2,7 +2,7 @@
 
 Pure CV UI element detection from screenshots. No ML models, no GPU, no training data — just OpenCV.
 
-Detect buttons, icons, text regions, list items, and UI zones from any desktop application screenshot in **4-30ms**.
+Detect buttons, icons, text regions, list items, and UI zones from any desktop application screenshot in **17-40ms**.
 
 ## What it does
 
@@ -23,14 +23,14 @@ for rect in ctx.rects:
 
 Existing UI detection tools require ML models (OmniParser needs YOLO + Florence, ScreenAI needs a 5B VLM). They're accurate but slow (500ms+) and need GPU.
 
-cvui takes a different approach: **pure computer vision**. Adaptive TopHat/BlackHat separates foreground from background regardless of theme, Otsu auto-thresholds with zero parameters, morphological operations group elements into components. The result: UI element detection in **4ms** on CPU.
+cvui takes a different approach: **pure computer vision**. Adaptive TopHat/BlackHat separates foreground from background regardless of theme, Otsu auto-thresholds with zero parameters, morphological operations group elements into components. The result: UI element detection in **17ms** on CPU.
 
 This is designed as the **fast first pass** in a multi-layer perception stack:
 
 ```
 Layer -1: DOM / Accessibility Tree  (browser, 0ms, perfect)
 Layer  0: Win32 UI Automation       (standard apps, 0ms, precise)
-Layer  1: cvui                      (self-drawing apps, 4-30ms, good)  <-- this
+Layer  1: cvui                      (self-drawing apps, 17-40ms, good)  <-- this
 Layer  2: OCR                       (text supplement, 100ms)
 Layer  3: ML models                 (semantic understanding, 500ms+)
 ```
@@ -39,16 +39,13 @@ Most apps have structural data (DOM or accessibility tree) and don't need cvui a
 
 ## Performance
 
-Benchmarked on WeChat (1021x1453 screenshot, Windows 11):
-
 | Pipeline | Time | Elements | Description |
 |----------|------|----------|-------------|
-| `fast_pipeline()` | **4ms** | ~70 | Bounding boxes only |
-| `fast_pipeline(scale=0.75)` | **17ms** | ~52 | Downscaled, 2x faster |
-| `standard_pipeline()` | **30ms** | ~55 | + filter + merge |
-| `full_pipeline()` | **40ms** | ~60 | + nested + classify + color analysis |
+| `fast_pipeline()` | **~17ms** | ~52 | 0.75x downscale, bounding boxes only |
+| `standard_pipeline()` | **~33ms** | ~55 | + filter + merge |
+| `full_pipeline()` | **~40ms** | ~60 | + nested + classify + color analysis |
 
-Zero parameters to tune. Works on both dark and light themes automatically.
+Benchmarked on WeChat (1021×1453), Windows 11, CPU only. Zero parameters to tune. Works on both dark and light themes automatically.
 
 ## Installation
 
@@ -155,6 +152,19 @@ ctx = pipeline.run(img)
 # Pipeline stops early if ConnectedComponentStage.quality_score > 0.8
 ```
 
+## Pipeline Debugger
+
+交互式浏览器端调参工具 — 节点编辑器界面，拖拽构建 CV pipeline，实时预览每步结果。
+
+```bash
+python -m tools.debugger
+# → http://localhost:8710
+```
+
+**功能：** 16 种 CV 节点（模糊/阈值/形态学/轮廓检测等），贝塞尔连线，参数滑块实时调节，双击放大预览，Ctrl+V 粘贴截图，导出 Python 脚本。
+
+详见 [docs/superpowers/plans/2026-03-26-pipeline-debugger.md](docs/superpowers/plans/2026-03-26-pipeline-debugger.md)
+
 ## Architecture
 
 ### Pluggable pipeline
@@ -174,9 +184,12 @@ DetectionContext (img, gray, binary, rects, quality_score, ...)
 ├─ MergeStage ──────┤  merge overlapping boxes
 ├─ NestedStage ─────┤  recurse into large containers for child elements
 ├─ ClassifyStage ───┤  icon / text / image / container by aspect ratio
-├─ ChannelAnalysis ─┤  G-R = selected, R-B = badge, B-R = link
+├─ ChannelAnalysis ─┤  G-R = highlight, R-B = badge, B-R = link
+├─ SaturationFilter ┤  HSV saturation mask to isolate UI from photos
+├─ ZoneDetector ────┤  coarse morphology to find major UI panels
 ├─ DiffStage ───────┤  frame comparison, skip if unchanged
 ├─ ListQuantize ────┤  template propagation for list items
+├─ EnsembleStage ───┤  multi-strategy: probe → classify → dispatch
 ├─ OmniParserStage ─┤  optional: YOLO icon detection
 └─ GroundingDINO ───┘  optional: text-guided zero-shot detection
 ```
@@ -190,6 +203,8 @@ src/cvui/
 │   ├── preprocessing.py     # Downscale, Grayscale, TopHat, Otsu
 │   ├── morphology.py        # Dilate, ConnectedComponent, RectFilter, Merge
 │   ├── analysis.py          # Nested, Classify, ChannelAnalysis, Diff, ListQuantize
+│   ├── advanced.py          # SaturationFilter, ZoneDetector, ColorQuantize, etc.
+│   ├── ensemble.py          # EnsembleStage — multi-strategy detection
 │   └── ml.py                # OmniParser, GroundingDINO (optional deps)
 ├── visualize.py             # render_skeleton, render_annotated, render_grayscale
 ├── types.py                 # UIElement, UIZone, UIBlueprint, OCRWord
@@ -200,6 +215,11 @@ src/cvui/
 │   ├── input.py             # send_text, send_click, send_hotkey
 │   └── _vk_map.py           # virtual key codes
 └── screen.py                # Multi-monitor DPI-aware screenshot (mss)
+
+tools/debugger/              # Interactive pipeline debugger (browser UI)
+├── server.py                # FastAPI backend — Stage API + Generic CV Nodes
+├── index.html               # Node editor frontend
+└── __main__.py              # Entry point: python -m tools.debugger
 ```
 
 ### Key design decisions
@@ -210,7 +230,7 @@ src/cvui/
 
 **List item template propagation**: `ListQuantizeStage` finds a reference item (highlighted selection or spacing pattern), uses its height as step, and expands up/down stopping at the first empty slot. 3ms for a 6-item list — no wasted checks on blank areas.
 
-**Downscale for speed**: `DownscaleStage(scale=0.75)` cuts processing time in half (33ms → 17ms) while losing only ~2 elements. Coordinates auto-map back to original resolution.
+**Downscale for speed**: `fast_pipeline()` defaults to `scale=0.75`, which cuts resolution and speeds up all downstream stages. Coordinates auto-map back to original resolution.
 
 ## Preset pipelines
 
