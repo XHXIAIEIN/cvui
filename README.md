@@ -50,13 +50,7 @@ Benchmarked on WeChat (1021×1453), Windows 11, CPU only. Zero parameters to tun
 ## Installation
 
 ```bash
-pip install cvui
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/anthropics/cvui.git
+git clone https://github.com/XHXIAIEIN/cvui.git
 cd cvui
 pip install -e .
 ```
@@ -64,9 +58,9 @@ pip install -e .
 ### Optional dependencies
 
 ```bash
-pip install cvui[ocr]      # Windows OCR (WinRT) — text extraction
-pip install cvui[ml]       # OmniParser + Grounding DINO stages
-pip install cvui[window]   # Win32 window capture + input simulation
+pip install -e ".[ocr]"      # Windows OCR (WinRT) — text extraction
+pip install -e ".[ml]"       # OmniParser + Grounding DINO stages
+pip install -e ".[window]"   # Win32 window capture + input simulation
 ```
 
 ## Quick start
